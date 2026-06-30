@@ -27,6 +27,25 @@ export function buildLocales(candidates: Candidate[]): Locales {
   return { en: ordered, ja, translationTodo };
 }
 
+/** Expand flat dotted keys ("a.b.c") into a nested object. next-intl (use-intl)
+ *  resolves a dotted lookup against NESTED messages only — a flat `{"a.b": v}` map
+ *  returns the key itself at runtime (a silent miss that compile-green never catches).
+ *  vue-i18n resolves flat dotted keys directly, so this is next-intl-specific. */
+export function nestLocale(flat: Record<string, string>): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  for (const [dotted, val] of Object.entries(flat)) {
+    const parts = dotted.split(".");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (typeof node[p] !== "object" || node[p] === null) node[p] = {};
+      node = node[p] as Record<string, unknown>;
+    }
+    node[parts[parts.length - 1]] = val;
+  }
+  return root;
+}
+
 export interface ReviewItem {
   file: string;
   kind: string;

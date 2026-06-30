@@ -1,27 +1,16 @@
 import { parse } from "@vue/compiler-sfc";
 import type { Candidate, Klass, ExtractReport } from "./types.ts";
+import { classifyText, classifyAttr, isIconClass, norm, NEVER_COPY_ATTRS } from "./classify-core.ts";
 
-// @vue/compiler-dom NodeTypes (kept as local constants so we do not depend on
-// the enum export shape across compiler versions).
+// @vue/compiler-dom NodeTypes (kept as local constants so we do not depend on the
+// enum export shape across compiler versions).
 const ELEMENT = 1;
 const TEXT = 2;
+const INTERPOLATION = 5;
 const ATTRIBUTE = 6;
+const DIRECTIVE = 7;
 
-// Tags whose text content is never user-facing copy.
 const CODE_TAGS = new Set(["script", "style", "code", "pre", "textarea"]);
-// Static attributes that hold user-facing copy and are safe to rewire to a binding.
-const TEXT_ATTRS = new Set(["placeholder", "title", "alt", "aria-label", "aria-placeholder"]);
-// Attributes that are never user-facing copy (routes, urls, ids, technical values).
-const NEVER_COPY_ATTRS = new Set([
-  "to", "href", "src", "id", "name", "for", "type", "value", "key", "ref", "rel",
-  "target", "lang", "dir", "role", "width", "height", "min", "max", "step", "d",
-  "fill", "stroke", "viewbox", "xmlns", "style", "class", "model", "v-model",
-]);
-// Icon-font ligature carriers: their text IS the glyph; translating breaks the icon.
-const ICON_CLASS = /\bmaterial-(icons|symbols)/;
-
-const hasLetter = (s: string): boolean => /\p{L}/u.test(s);
-const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 interface AnyNode {
   type: number;
@@ -40,22 +29,22 @@ function classOf(el: AnyNode): string {
   return c?.value?.content ?? "";
 }
 
-/** An element directly containing BOTH non-whitespace text AND child elements is a
- *  prose sentence (e.g. "Vue's <a>docs</a> provide..."); its text fragments cannot
- *  be auto-wrapped without splitting, so everything under it is AMBIGUOUS. */
+/** An element directly containing non-whitespace text AND (child elements OR a
+ *  {{ interpolation }}) is a mixed flow — a prose sentence or an interpolated
+ *  phrase ("{{ count }} items"). Its text fragments cannot be auto-wrapped without
+ *  splitting / losing the placeholder, so everything under it is AMBIGUOUS. */
 function isSentenceContainer(el: AnyNode): boolean {
   let hasText = false;
-  let hasEl = false;
+  let hasMix = false;
   for (const ch of el.children ?? []) {
     if (ch.type === TEXT && norm(ch.content ?? "")) hasText = true;
-    else if (ch.type === ELEMENT) hasEl = true;
+    else if (ch.type === ELEMENT || ch.type === INTERPOLATION) hasMix = true;
   }
-  return hasText && hasEl;
+  return hasText && hasMix;
 }
 
 /** Inner trimmed [start,end] offsets of a text node (preserve surrounding ws).
- *  Trims against loc.source (the exact source slice) so offsets never drift on
- *  CRLF files or entity-decoded content. */
+ *  Trims against loc.source so offsets never drift on CRLF / entity-decoded text. */
 function innerSpan(node: AnyNode): { start: number; end: number; raw: string } {
   const raw0 = node.loc.source ?? node.content ?? "";
   const s0 = node.loc.start.offset;
@@ -66,62 +55,45 @@ function innerSpan(node: AnyNode): { start: number; end: number; raw: string } {
   return { start, end, raw: raw0.slice(lead, raw0.length - trail) };
 }
 
-function classifyText(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean): Candidate | null {
+function textCandidate(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean): Candidate | null {
   const text = norm(node.content ?? "");
-  if (!text) return null; // pure whitespace: not a candidate at all
+  const d = classifyText(text, {
+    inCode,
+    iconParent: !!parent && isIconClass(classOf(parent)),
+    inSentence,
+    parentTag: parent?.tag ?? "",
+  });
+  if (!d) return null;
   const { start, end, raw } = innerSpan(node);
-  const base = { kind: "text" as const, tag: parent?.tag ?? "", text, raw, start, end };
-  const skip = (reason: string): Candidate => ({ file: "", cls: "SKIP", reason, ...base });
-
-  if (inCode) return skip("inside code/preformatted block");
-  if (parent && ICON_CLASS.test(classOf(parent))) return skip("icon-font ligature (would break the glyph)");
-  if (!hasLetter(text)) return skip("no natural-language letters (number/symbol)");
-  // single dotted/hyphenated numeric token: version / id / SKU, not copy (e.g. v2.3.1)
-  if (!/\s/.test(text) && /\d/.test(text) && /[.\-_:]\d/.test(text)) return skip("version/identifier-like token");
-  if (inSentence) return { file: "", cls: "AMBIGUOUS", reason: "fragment of a mixed text+markup sentence", ...base };
-  // Sole, clean text content of its element -> safe to wrap.
-  return { file: "", cls: "HIGH", reason: "sole text child of <" + (parent?.tag ?? "?") + ">", ...base };
+  return { file: "", kind: "text", tag: parent?.tag ?? "", text, raw, start, end, cls: d.cls, reason: d.reason };
 }
 
-function classifyAttr(attr: AnyNode, ownerTag: string): Candidate | null {
+function attrCandidate(attr: AnyNode, ownerTag: string): Candidate | null {
   if (attr.type !== ATTRIBUTE || !attr.value) return null;
-  const val = norm(attr.value.content);
-  if (!val || !hasLetter(val)) return null;
-  const name = attr.name ?? "";
-  if (NEVER_COPY_ATTRS.has(name.toLowerCase())) return null;
-  const raw = attr.loc.source;
-  const start = attr.loc.start.offset;
-  const end = attr.loc.end.offset;
-  const base = { kind: "attr" as const, attrName: name, tag: ownerTag, text: val, raw, start, end };
-  if (TEXT_ATTRS.has(name)) {
-    return { file: "", cls: "HIGH", reason: `user-facing attribute "${name}"`, ...base };
-  }
-  // A string prop on a child component (Capitalized / kebab-with-dash tag) MIGHT be
-  // display text, but could just as well be an id/url/mode -> never auto-rewire.
-  const isComponent = /[A-Z]/.test(ownerTag) || ownerTag.includes("-");
-  if (isComponent) {
-    return { file: "", cls: "AMBIGUOUS", reason: `string prop "${name}" on component <${ownerTag}> (may not be copy)`, ...base };
-  }
-  return null;
+  const d = classifyAttr(attr.name ?? "", attr.value.content, ownerTag);
+  if (!d) return null;
+  return {
+    file: "", kind: "attr", attrName: attr.name, tag: ownerTag, text: norm(attr.value.content),
+    raw: attr.loc.source, start: attr.loc.start.offset, end: attr.loc.end.offset, cls: d.cls, reason: d.reason,
+  };
 }
 
 function walk(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean, out: Candidate[]): void {
   if (node.type === TEXT) {
-    const c = classifyText(node, parent, inSentence, inCode);
+    const c = textCandidate(node, parent, inSentence, inCode);
     if (c) out.push(c);
     return;
   }
-  if (node.type !== ELEMENT) return; // interpolation/comment/etc: not literal copy
+  if (node.type !== ELEMENT) return; // interpolation/comment: not literal copy
   const tag = (node.tag ?? "").toLowerCase();
   const childCode = inCode || CODE_TAGS.has(tag);
-  // attributes
   for (const p of node.props ?? []) {
-    const c = classifyAttr(p, node.tag ?? "");
+    const c = attrCandidate(p, node.tag ?? "");
     if (c) out.push(c);
   }
-  // A named slot (<template #heading>) is a distinct content region, not part of
-  // any surrounding prose flow, so the sentence context resets at its boundary.
-  const isSlotTemplate = tag === "template" && (node.props ?? []).some((p) => p.type === 7 && p.name === "slot");
+  // A named slot (<template #heading>) is a distinct content region; the sentence
+  // context resets at its boundary rather than inheriting the surrounding prose.
+  const isSlotTemplate = tag === "template" && (node.props ?? []).some((p) => p.type === DIRECTIVE && p.name === "slot");
   const childSentence = isSlotTemplate ? isSentenceContainer(node) : inSentence || isSentenceContainer(node);
   for (const ch of node.children ?? []) walk(ch, node, childSentence, childCode, out);
 }
@@ -143,22 +115,17 @@ export function extractFile(file: string, source: string): ExtractReport {
     parseError = (e as Error).message;
   }
   candidates = candidates.map((c) => ({ ...c, file }));
-  // Verify every offset actually points at the raw text (defends against
-  // offset-base drift); demote mismatches to SKIP so rewire never corrupts.
+  // Verify every offset actually points at the raw text (defends against drift);
+  // demote any mismatch to SKIP so rewire can never corrupt the file.
   for (const c of candidates) {
-    const slice = source.slice(c.start, c.end);
-    if (slice !== c.raw) {
+    if (source.slice(c.start, c.end) !== c.raw) {
       c.cls = "SKIP";
       c.reason = "offset/source mismatch (not rewired)";
     }
   }
   const count = (k: Klass) => candidates.filter((c) => c.cls === k).length;
-  return {
-    file,
-    candidates,
-    high: count("HIGH"),
-    ambiguous: count("AMBIGUOUS"),
-    skip: count("SKIP"),
-    parseError,
-  };
+  return { file, candidates, high: count("HIGH"), ambiguous: count("AMBIGUOUS"), skip: count("SKIP"), parseError };
 }
+
+// re-export for callers that imported these from extract previously
+export { NEVER_COPY_ATTRS };
