@@ -20,6 +20,26 @@ function classNameOf(attrs: ts.JsxAttributes, sf: ts.SourceFile): string {
   return "";
 }
 
+/** Element is screen-reader-hidden: aria-hidden="true" / aria-hidden (shorthand) /
+ *  aria-hidden={true}, or role="presentation"/"none". Its visible glyphs are decorative,
+ *  so any letters inside are not translatable copy. */
+function isDecorativeEl(attrs: ts.JsxAttributes, sf: ts.SourceFile): boolean {
+  for (const a of attrs.properties) {
+    if (!ts.isJsxAttribute(a)) continue;
+    const n = a.name.getText(sf).toLowerCase();
+    const init = a.initializer;
+    if (n === "aria-hidden") {
+      if (!init) return true; // <span aria-hidden> shorthand = true
+      if (ts.isStringLiteral(init)) return init.text === "true";
+      if (ts.isJsxExpression(init) && init.expression && init.expression.kind === ts.SyntaxKind.TrueKeyword) return true;
+    }
+    if (n === "role" && init && ts.isStringLiteral(init)) {
+      if (init.text === "presentation" || init.text === "none") return true;
+    }
+  }
+  return false;
+}
+
 /** A parent whose children mix non-whitespace text with element OR {expression}
  *  children is a sentence/interpolated flow; its text fragments are AMBIGUOUS. */
 function isSentenceContainer(children: ts.NodeArray<ts.JsxChild>): boolean {
@@ -33,7 +53,7 @@ function isSentenceContainer(children: ts.NodeArray<ts.JsxChild>): boolean {
   return hasText && hasMix;
 }
 
-interface Ctx { inSentence: boolean; inCode: boolean; parentTag: string; iconParent: boolean; }
+interface Ctx { inSentence: boolean; inCode: boolean; parentTag: string; iconParent: boolean; decorative: boolean; }
 
 function innerTextSpan(node: ts.JsxText, sf: ts.SourceFile, source: string): { start: number; end: number; raw: string } {
   const s0 = node.getStart(sf);
@@ -75,7 +95,7 @@ function walk(node: ts.Node, ctx: Ctx, sf: ts.SourceFile, source: string, out: C
     const d = classifyText(text, { inCode: ctx.inCode, iconParent: ctx.iconParent, inSentence: ctx.inSentence, parentTag: ctx.parentTag });
     if (!d) return;
     const { start, end, raw } = innerTextSpan(node, sf, source);
-    out.push({ file: "", kind: "text", tag: ctx.parentTag, text, raw, start, end, cls: d.cls, reason: d.reason });
+    out.push({ file: "", kind: "text", tag: ctx.parentTag, text, raw, start, end, cls: d.cls, reason: d.reason, decorative: ctx.decorative });
     return;
   }
   if (ts.isJsxExpression(node)) {
@@ -95,7 +115,8 @@ function walk(node: ts.Node, ctx: Ctx, sf: ts.SourceFile, source: string, out: C
     const low = tag.toLowerCase();
     const childCode = ctx.inCode || CODE_TAGS.has(low);
     const iconParent = isIconClass(classNameOf(open.attributes, sf));
-    walkChildren(node.children, tag, { inSentence: ctx.inSentence, inCode: childCode, parentTag: tag, iconParent }, sf, source, out);
+    const decorative = ctx.decorative || isDecorativeEl(open.attributes, sf);
+    walkChildren(node.children, tag, { inSentence: ctx.inSentence, inCode: childCode, parentTag: tag, iconParent, decorative }, sf, source, out);
     return;
   }
   if (ts.isJsxSelfClosingElement(node)) {
@@ -135,7 +156,7 @@ export function extractJsxFile(file: string, source: string): ExtractReport {
     // syntactic diagnostics on the parsed tree
     const diags = (sf as unknown as { parseDiagnostics?: ts.Diagnostic[] }).parseDiagnostics ?? [];
     if (diags.length) parseError = ts.flattenDiagnosticMessageText(diags[0].messageText, " ");
-    const root: Ctx = { inSentence: false, inCode: false, parentTag: "", iconParent: false };
+    const root: Ctx = { inSentence: false, inCode: false, parentTag: "", iconParent: false, decorative: false };
     ts.forEachChild(sf, (n) => walk(n, root, sf, source, candidates));
   } catch (e) {
     parseError = (e as Error).message;

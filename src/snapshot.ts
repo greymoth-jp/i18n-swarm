@@ -43,10 +43,23 @@ async function install(repo: RepoInfo): Promise<PhaseResult> {
   // PATH limit (node drops off PATH -> esbuild's postinstall fails). esbuild and
   // friends ship prebuilt platform binaries via optionalDependencies, so the build
   // still works without postinstall hooks.
-  const r = await runShell(`${npmCmd()} install --ignore-scripts --no-audit --no-fund`, {
-    cwd: repo.dir, timeoutMs: 12 * MIN, env: childEnv(repo), inherit: true,
-  });
-  return { ran: true, ok: r.ok, durationMs: r.durationMs, note: r.timedOut ? "install timed out" : r.ok ? "installed" : `install exit ${r.code}` };
+  const base = `${npmCmd()} install --ignore-scripts --no-audit --no-fund`;
+  const opts = { cwd: repo.dir, timeoutMs: 12 * MIN, env: childEnv(repo), inherit: true };
+  // Strict first: this keeps npm's peer auto-install, which a plain --legacy-peer-deps run
+  // would skip (and then e.g. recharts' react-is goes missing and the build breaks).
+  let r = await runShell(base, opts);
+  let legacy = false;
+  // Only loosen when strict resolution itself failed on a stale peer range (the react@19 /
+  // Next 16 transition is mid-flight across real OSS repos). The build gate stays the trust
+  // signal, so a loose tree that does not compile is still reported red.
+  if (!r.ok && !r.timedOut && /ERESOLVE/.test(r.stdout + r.stderr)) {
+    legacy = true;
+    r = await runShell(`${base} --legacy-peer-deps`, opts);
+  }
+  return {
+    ran: true, ok: r.ok, durationMs: r.durationMs,
+    note: r.timedOut ? "install timed out" : r.ok ? (legacy ? "installed (--legacy-peer-deps fallback)" : "installed") : `install exit ${r.code}`,
+  };
 }
 
 async function script(repo: RepoInfo, name: string | null, label: string): Promise<{ phase: PhaseResult; out: string }> {

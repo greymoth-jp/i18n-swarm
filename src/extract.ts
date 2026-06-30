@@ -29,6 +29,17 @@ function classOf(el: AnyNode): string {
   return c?.value?.content ?? "";
 }
 
+/** Element is screen-reader-hidden (aria-hidden="true" or role="presentation"/"none"):
+ *  its glyphs are decorative, so any letters inside are not translatable copy. */
+function isDecorativeEl(el: AnyNode): boolean {
+  for (const p of el.props ?? []) {
+    if (p.type !== ATTRIBUTE) continue;
+    if (p.name === "aria-hidden" && (p.value?.content ?? "true") === "true") return true;
+    if (p.name === "role" && (p.value?.content === "presentation" || p.value?.content === "none")) return true;
+  }
+  return false;
+}
+
 /** An element directly containing non-whitespace text AND (child elements OR a
  *  {{ interpolation }}) is a mixed flow — a prose sentence or an interpolated
  *  phrase ("{{ count }} items"). Its text fragments cannot be auto-wrapped without
@@ -55,7 +66,7 @@ function innerSpan(node: AnyNode): { start: number; end: number; raw: string } {
   return { start, end, raw: raw0.slice(lead, raw0.length - trail) };
 }
 
-function textCandidate(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean): Candidate | null {
+function textCandidate(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean, decorative: boolean): Candidate | null {
   const text = norm(node.content ?? "");
   const d = classifyText(text, {
     inCode,
@@ -65,7 +76,7 @@ function textCandidate(node: AnyNode, parent: AnyNode | null, inSentence: boolea
   });
   if (!d) return null;
   const { start, end, raw } = innerSpan(node);
-  return { file: "", kind: "text", tag: parent?.tag ?? "", text, raw, start, end, cls: d.cls, reason: d.reason };
+  return { file: "", kind: "text", tag: parent?.tag ?? "", text, raw, start, end, cls: d.cls, reason: d.reason, decorative };
 }
 
 function attrCandidate(attr: AnyNode, ownerTag: string): Candidate | null {
@@ -78,15 +89,16 @@ function attrCandidate(attr: AnyNode, ownerTag: string): Candidate | null {
   };
 }
 
-function walk(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean, out: Candidate[]): void {
+function walk(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode: boolean, decorative: boolean, out: Candidate[]): void {
   if (node.type === TEXT) {
-    const c = textCandidate(node, parent, inSentence, inCode);
+    const c = textCandidate(node, parent, inSentence, inCode, decorative);
     if (c) out.push(c);
     return;
   }
   if (node.type !== ELEMENT) return; // interpolation/comment: not literal copy
   const tag = (node.tag ?? "").toLowerCase();
   const childCode = inCode || CODE_TAGS.has(tag);
+  const childDecorative = decorative || isDecorativeEl(node);
   for (const p of node.props ?? []) {
     const c = attrCandidate(p, node.tag ?? "");
     if (c) out.push(c);
@@ -95,7 +107,7 @@ function walk(node: AnyNode, parent: AnyNode | null, inSentence: boolean, inCode
   // context resets at its boundary rather than inheriting the surrounding prose.
   const isSlotTemplate = tag === "template" && (node.props ?? []).some((p) => p.type === DIRECTIVE && p.name === "slot");
   const childSentence = isSlotTemplate ? isSentenceContainer(node) : inSentence || isSentenceContainer(node);
-  for (const ch of node.children ?? []) walk(ch, node, childSentence, childCode, out);
+  for (const ch of node.children ?? []) walk(ch, node, childSentence, childCode, childDecorative, out);
 }
 
 /** Parse one SFC and classify every text node + attribute. */
@@ -107,7 +119,7 @@ export function extractFile(file: string, source: string): ExtractReport {
     if (errors.length) parseError = String(errors[0]?.message ?? errors[0]);
     const ast = descriptor.template?.ast as unknown as AnyNode | undefined;
     if (ast) {
-      for (const ch of ast.children ?? []) walk(ch, null, false, false, candidates);
+      for (const ch of ast.children ?? []) walk(ch, null, false, false, false, candidates);
     } else if (!parseError) {
       parseError = "no <template> block";
     }

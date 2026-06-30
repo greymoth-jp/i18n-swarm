@@ -1,29 +1,68 @@
 {
   "name": "i18n-swarm",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Deterministic localization agent for English-only Vue 3 apps: extracts UI strings, wires vue-i18n, generates locale files, rewires components, and self-verifies that the app still builds and tests stay green.",
+  "description": "Deterministic code-side i18n agent for English-only web apps: extracts UI strings, scaffolds next-intl / vue-i18n / react-i18next, rewires components, and self-verifies that the app still builds and tests stay green.",
   "author": "greymoth",
   "license": "MIT",
+  "keywords": [
+    "i18n",
+    "internationalization",
+    "localization",
+    "next-intl",
+    "vue-i18n",
+    "react-i18next",
+    "nextjs",
+    "vue",
+    "react",
+    "codemod"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/greymoth-jp/i18n-swarm.git"
+  },
+  "homepage": "https://github.com/greymoth-jp/i18n-swarm#readme",
+  "bugs": {
+    "url": "https://github.com/greymoth-jp/i18n-swarm/issues"
+  },
   "engines": {
     "node": ">=22.6.0"
   },
   "bin": {
-    "i18n-swarm": "src/cli.ts"
+    "i18n-swarm": "dist/cli.js"
   },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "selfcheck": "node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "selfcheck": "node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts",
     "detect": "node src/cli.ts detect",
     "extract": "node src/cli.ts extract",
     "apply": "node src/cli.ts apply",
     "verify": "node src/cli.ts verify",
-    "run": "node src/cli.ts run"
+    "audit": "node src/cli.ts audit",
+    "check": "node src/cli.ts check",
+    "run": "node src/cli.ts run",
+    "prepublishOnly": "tsc --noEmit && node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts && tsc -p tsconfig.build.json"
   },
-  "devDependencies": {
-    "@types/node": "^22.20.0",
+  "dependencies": {
     "@vue/compiler-sfc": "^3.5.39",
     "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0"
   }
 }

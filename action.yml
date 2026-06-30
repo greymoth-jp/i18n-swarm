@@ -1,0 +1,92 @@
+name: 'i18n-swarm localization drift gate'
+description: 'Fail the pull request when a new hardcoded UI string is added without a translation key (Next.js / React / Vue).'
+author: 'greymoth'
+
+branding:
+  icon: 'globe'
+  color: 'gray-dark'
+
+inputs:
+  path:
+    description: 'Directory to check (the app root). Default: the repository root.'
+    required: false
+    default: '.'
+  config:
+    description: >-
+      Optional path to an i18n-swarm.config.json (brands / enums / ignorePaths).
+      If set, it is copied to <path>/i18n-swarm.config.json so the check picks it
+      up. Otherwise the check auto-discovers i18n-swarm.config.json at the repo root.
+    required: false
+    default: ''
+  range:
+    description: >-
+      Optional git range "<base>..<head>" to check. If empty, it is derived from
+      the event (pull_request: base..head; push: before..after; otherwise the
+      working tree vs HEAD).
+    required: false
+    default: ''
+  version:
+    description: 'npm version or dist-tag of i18n-swarm to run.'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Run the i18n-swarm drift gate
+      shell: bash
+      env:
+        # Pass everything through env (never interpolate ${{ }} into the script body).
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_RANGE: ${{ inputs.range }}
+        INPUT_VERSION: ${{ inputs.version }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        # Optional: place a suppression config where the check auto-discovers it.
+        if [ -n "${INPUT_CONFIG}" ]; then
+          if [ -f "${INPUT_CONFIG}" ]; then
+            cp "${INPUT_CONFIG}" "${INPUT_PATH%/}/i18n-swarm.config.json"
+            echo "i18n-swarm: using config ${INPUT_CONFIG}"
+          else
+            echo "i18n-swarm: config '${INPUT_CONFIG}' not found, ignoring." >&2
+          fi
+        fi
+
+        # Decide the diff range. An explicit input wins; otherwise derive it from the event.
+        RANGE="${INPUT_RANGE}"
+        if [ -z "${RANGE}" ]; then
+          case "${EVENT_NAME}" in
+            pull_request|pull_request_target)
+              if [ -n "${PR_BASE_SHA}" ] && [ -n "${PR_HEAD_SHA}" ]; then
+                RANGE="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+              fi
+              ;;
+            push)
+              if [ -n "${PUSH_BEFORE}" ] && [ "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+                RANGE="${PUSH_BEFORE}..${PUSH_AFTER}"
+              fi
+              ;;
+          esac
+        fi
+
+        echo "i18n-swarm: checking '${INPUT_PATH}'${RANGE:+ over range ${RANGE}}"
+
+        # Wrap the existing `i18n-swarm check`. It exits 1 on a new un-keyed UI
+        # string, which (under set -e) fails this step and the job.
+        if [ -n "${RANGE}" ]; then
+          npx --yes "i18n-swarm@${INPUT_VERSION}" check "${RANGE}" --repo "${INPUT_PATH}"
+        else
+          npx --yes "i18n-swarm@${INPUT_VERSION}" check --repo "${INPUT_PATH}"
+        fi

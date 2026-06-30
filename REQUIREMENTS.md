@@ -97,6 +97,73 @@ Findings (verified, not assumed):
   wires `<NextIntlClientProvider messages={getMessages()}>` around the root layout's `<body>`
   (making it async if needed). Every edit is offset-surgical and reparse-verified; an
   unexpected config/layout shape is left in the review queue.
+## react-i18next path (2026-07-01 — plain React, NOT Next.js)
+The same classify/extract/rewire core now drives a third scaffold target: a plain React app
+(Vite or Create React App) with react-i18next. The mechanism is framework-agnostic, so only
+the binding and the scaffold are React-specific.
+
+Findings (verified on real apps, not assumed):
+- **Works on plain React.** Three unmodified English-only Vite/CRA apps with no i18n reached a
+  green build after the full pass, zero corruptions each: `codescandy/dash-ui` (Vite+TS,
+  1466 keys / 55 files / 45.7% auto), `ayoubhayda/react-admin-dashboard` (Vite+JS, 7 / 7.5%),
+  and the stock `create-vite` react-ts template (7 / 43.8%). Both build shapes were exercised
+  (`tsc -b && vite build` and `vite build`). A 4th, `Daaviddev/vite-dashboard-starter`, was
+  dropped: its baseline build was already red (`TS5101`, deprecated `baseUrl` in tsconfig vs.
+  current TypeScript) — the build gate refuses to claim a green it did not cause.
+- **How it differs from next-intl.** No server/client split: there is no async server
+  component, so the binding is always the single client-side hook `useTranslation()` (next-intl
+  has to choose between `useTranslations()` and `await getTranslations()` on async-ness).
+  Entry wiring replaces layout wiring: instead of wrapping the App-Router `<body>` in
+  `<NextIntlClientProvider>`, the agent finds the `createRoot(...).render(...)` /
+  `ReactDOM.render(...)` call at the app entry and wraps the mounted root element in
+  `<I18nextProvider i18n={i18n}>` plus `import './i18n'`. Locales stay FLAT (react-i18next can
+  resolve flat dotted keys with `keySeparator:false`; next-intl needs `nestLocale()`).
+- **The resolveJsonModule trap (React-specific).** A TS app without `resolveJsonModule` fails
+  to typecheck a `import en from './locales/en.json'`. The scaffold reads the project's tsconfig
+  and, when a JSON import would not typecheck, inlines the resources into the init module
+  instead (JS apps and resolveJsonModule-on TS apps keep the JSON import). This is what kept the
+  TS apps green; the build gate is still the authority. `useSuspense:false` is set because the
+  inlined resources init synchronously.
+
+## Drift-gate false-positive suppression (2026-07-01 — making the gate enforceable)
+The PoC found the gate clean in incremental (diff) mode but noisy whole-codebase, so a
+suppression layer (`suppress.ts`) now runs after the classifier and demotes a HIGH flag to
+a soft note in five buckets: brand/handle, decorative (aria-hidden + decorative `alt`),
+code identifier (camel/Pascal/kebab/SCREAMING/dotted/variant-enum/breakpoint), dev-only
+path (OG-image + metadata routes, config, stories, tests, scripts, viewport indicators),
+and an inline `// i18n-ignore` directive. Lists are user-extensible via
+`i18n-swarm.config.json` (`brands` / `enums` / `ignorePaths`). The decorative bucket needed
+element context, so the JSX and Vue extractors now stamp text candidates that sit inside an
+`aria-hidden` / `role="presentation"` element (classifier decisions are unchanged).
+
+Re-measured on the same 5-repo corpus, whole-codebase, against each repo's pristine HEAD
+(so earlier tool runs against the checkouts don't skew it), with an independent ground-truth
+oracle written separately from the suppressor (verified, not assumed):
+
+- **Baseline FP depends on the lens, and the aggregate is dominated by one repo.** Of 1618
+  whole-codebase flags, 1470 (91%) come from `dash-ui`, a Bootstrap *component showcase*
+  whose page content literally is component names, variant tokens and demo data — a worst
+  case for any hardcoded-string gate. A conservative oracle (only clear non-copy is a false
+  positive; section/label headings are real copy) puts the raw baseline at 13.7%; a strict
+  "showcase content is noise" oracle puts it at 44%. The PoC's ~32% sits between the two.
+- **Generic suppression (no per-project config): 13.7% → 7.1% corpus-wide, with 0
+  false-negatives** (no real copy silenced, on every repo). The real signal is per-repo:
+  the four genuine product apps land at 0% / 0% / 0% (react-admin, open-react-template,
+  shadcn-next-template) and 25% on `precedent` — where "25%" is 4 flags out of 16, namely
+  the product's own name and two utility-function names shown in a code grid. Only the
+  `dash-ui` showcase keeps a real residue (7.4%), all of it Bootstrap demo placeholder data
+  (`Otto`, `@mdo`, `Cell`).
+- **With a one-line per-project allowlist** (the showcase's demo tokens): corpus FP → 0.1%,
+  `dash-ui` → 0%, still 0 false-negatives. The last two residual flags are the `precedent`
+  product name, which a `brands` entry closes.
+
+Verdict: on real product code — the gate's actual deployment target — generic suppression
+already reaches single digits and effectively 0 with a product-name entry, with no real
+copy ever suppressed, so "a new hardcoded string is a red check" is enforceable as a hard
+release-blocker. A component-showcase repo stays noisy without an allowlist, because its
+content genuinely is the component vocabulary; the config handles that case. Re-run the
+measurement with `node test/fp-corpus-measure.ts`.
+
 - **Green, merge-ready for the common case (verified, not assumed).** Full end-to-end pass
   on two real, unmodified OSS apps: `cruip/open-react-template` (99 strings / 13 files /
   84.6% / 0 corruptions) and `shadcn-ui/next-template` (12 / 4 / 66.7% / 0). Both reach
@@ -106,3 +173,27 @@ Findings (verified, not assumed):
   stays in review is now only genuine human work (prose + ja translations), with no
   framework-wiring debt. App-specific shapes (i18n routing, client-component layout, unusual
   exports) still fall to the queue by design.
+
+## Attr/prop classification refinement (2026-07-01, re-verified end to end on the 8-app corpus)
+The first cut flagged EVERY string prop on a component as AMBIGUOUS ("may not be copy"),
+flooding the review queue with config that is not localizable at all. `classifyAttr` now
+decides on the prop name + value shape:
+- **dropped (not copy, never queued):** `data-*`; name suffixes `*className/*class/*url/*src/
+  *color/variant/size/align/mode/position/...`; and enum-shaped values — a single lower-case
+  kebab/snake/camel token (`primary`, `sm`, `insideLeft`), a css value (`var(--x)`, `#hex`),
+  or a url/path.
+- **HIGH (auto-wired):** a display-copy prop (`label`, `heading`, `subtitle`, `description`,
+  `caption`, `tooltip`, `text`, `message`, `pageTitle`, `pageDescription`, ...) whose value is
+  prose-shaped (`isCopyShaped`: multi-word, or a capitalized real word). A bare lower-case
+  token on a copy-ish prop stays in review, never auto-wired.
+- **AMBIGUOUS (review):** a multi-word value on an unknown prop name — genuinely unclear.
+Result on the eight-app Next corpus (re-run with the packed CLI, fresh install + `next build`):
+average auto-handled 42.7% → 76.9% (per-app 49%–95%), review-queue prose 2116 → 422, and +83
+strings genuinely newly auto-wired — build-verified type-safe, since adm-dashboard (670 edits),
+kiran-dashboard (320) and magicui (242) all still reach a green `next build`. Corruptions stay
+0 across all 10 apps; post-i18n build green 8/8. The conservative never-split rule is unchanged
+(393 mixed/interpolated fragments stay in review). What genuinely cannot be auto-handled and
+stays in review: 137 HIGH strings in react-table column callbacks / HOC render configs /
+module-level brand-name icon objects (a translation hook cannot live there); and — absent from
+this corpus, so deliberately NOT built ahead — `[locale]` routing and a client-component root
+layout, where the safe next-intl wiring needs a server boundary the agent will not invent.

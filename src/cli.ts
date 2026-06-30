@@ -8,6 +8,8 @@ import { decideVerdict, type VerifyDecision } from "./verdict.ts";
 import {
   buildReviewQueue, verdictCardSvg, reportHtml, summaryLine, type ProductSummary,
 } from "./report.ts";
+import { runCheck } from "./check.ts";
+import { auditRepo, auditMarkdown } from "./audit.ts";
 import fs from "node:fs";
 
 function log(...a: unknown[]) { process.stdout.write(Buffer.from(a.join(" ") + "\n", "utf8")); }
@@ -17,8 +19,11 @@ function parseArgs(argv: string[]) {
   const pos: string[] = [];
   const flags: Record<string, boolean | string> = {};
   for (const a of argv) {
-    if (a.startsWith("--")) flags[a.slice(2)] = true;
-    else pos.push(a);
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      if (eq >= 0) flags[a.slice(2, eq)] = a.slice(eq + 1);
+      else flags[a.slice(2)] = true;
+    } else pos.push(a);
   }
   return { pos, flags };
 }
@@ -229,7 +234,81 @@ async function cmdRun(dir: string) {
   writeArtifact(dir, "run.json", { metrics: out.metrics, baseline, after, decision });
 }
 
-const COMMANDS = new Set(["detect", "extract", "apply", "verify", "run", "help", "--help", "-h"]);
+/** The recurring drift-gate: fail a diff that adds a new un-keyed user-facing string. */
+function cmdCheck(pos: string[], flags: Record<string, boolean | string>) {
+  const range = typeof pos[0] === "string" ? pos[0] : undefined;
+  const repo = typeof flags["repo"] === "string" ? (flags["repo"] as string) : undefined;
+  const files = typeof flags["files"] === "string" ? (flags["files"] as string).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+  const noSuppress = flags["no-suppress"] === true;
+  const res = runCheck({ range, repo, files, noSuppress });
+
+  if (flags["json"]) { log(JSON.stringify(res, null, 2)); process.exitCode = res.pass ? 0 : 1; return; }
+
+  hr();
+  log(`i18n-swarm check   ${res.base}..${res.head}   (${res.filesScanned} UI file(s) in diff)`);
+  hr();
+  if (res.pass && res.files.length === 0) {
+    log("PASS - no newly-added user-facing strings in this diff.");
+    process.exitCode = 0;
+    return;
+  }
+  for (const f of res.files) {
+    if (f.flags.length) {
+      log(`FAIL  ${f.file}`);
+      for (const fl of f.flags) {
+        const where = fl.kind === "attr" ? `<${fl.tag} ${fl.attrName}=...>` : `<${fl.tag}>`;
+        log(`   line ${fl.line}  ${where}  ${JSON.stringify(fl.text)}   -> key ${fl.key}`);
+      }
+      if (f.suggestedDiff) {
+        log("   suggested fix (keyed, scoped to the new strings only):");
+        for (const dl of f.suggestedDiff.replace(/\n$/, "").split("\n")) log("   | " + dl);
+      }
+    }
+    if (f.newAmbiguous.length) {
+      log(`REVIEW ${f.file}  (not a failure - needs a human decision)`);
+      for (const a of f.newAmbiguous.slice(0, 6)) log(`   line ${a.line}  ${JSON.stringify(a.text.slice(0, 60))}  (${a.reason})`);
+    }
+  }
+  if (res.totalSuppressed) {
+    const b = res.suppressedByBucket;
+    const parts = (Object.keys(b) as (keyof typeof b)[]).filter((k) => b[k]).map((k) => `${k} ${b[k]}`);
+    log(`SUPPRESSED ${res.totalSuppressed} non-copy flag(s) [${parts.join(", ")}] - brand/code/decorative/dev-only/ignored, not blocking (run --no-suppress to see them).`);
+  }
+  hr();
+  if (res.pass) {
+    log(`PASS - 0 new hardcoded UI strings. ${res.files.reduce((s, f) => s + f.newAmbiguous.length, 0)} ambiguous string(s) flagged for review (non-blocking).`);
+    process.exitCode = 0;
+  } else {
+    log(`FAIL - ${res.totalFlags} new hardcoded UI string(s) landed un-keyed. Apply the suggested diff or wrap them in t()/$t().`);
+    process.exitCode = 1;
+  }
+  hr();
+}
+
+/** Read-only readiness report: scan a repo, write nothing into its source, emit a
+ *  PR-body-ready Markdown audit + a JSON summary into .i18nswarm/. */
+function cmdAudit(dir: string, flags: Record<string, boolean | string>) {
+  const report = auditRepo(dir);
+  if (flags["json"]) { log(JSON.stringify(report, null, 2)); return; }
+  if (flags["md"]) { log(auditMarkdown(report)); return; }
+  const md = auditMarkdown(report);
+  const od = outDir(dir);
+  fs.writeFileSync(path.join(od, "audit.md"), md, "utf8");
+  writeArtifact(dir, "audit.json", report);
+  const s = report.strings;
+  hr(); log(`AUDIT: ${report.repo}  (${report.framework})`); hr();
+  log(`  i18n wired:        ${report.i18n.wired ? "yes (" + report.i18n.library + ")" : "no"}`);
+  log(`  component files:   ${s.componentFiles}  (parse errors: ${s.parseErrors})`);
+  log(`  hardcoded strings: ${s.hardcoded}  across ${s.filesWithHardcoded} file(s)`);
+  log(`  share hardcoded:   ${s.hardcodedSharePct === null ? "n/a" : s.hardcodedSharePct + "%"}  (of detected UI copy)`);
+  log(`  auto-wire (det.):  ${report.retrofit.autoWired}  (${report.retrofit.autoHandledPct}% of hardcoded), ${report.retrofit.corruptions} corruptions in dry run`);
+  log(`  review queue:      ${report.retrofit.reviewQueue}  (prose ${report.retrofit.review.prose}, unusual ${report.retrofit.review.unusualComponents}, translations ${report.retrofit.review.translations})`);
+  log(`  drift baseline:    ${report.driftGate.baseline}`);
+  log(`  wrote .i18nswarm/audit.md  .i18nswarm/audit.json`);
+  hr();
+}
+
+const COMMANDS = new Set(["detect", "extract", "apply", "verify", "run", "check", "audit", "help", "--help", "-h"]);
 
 function usage() {
   log("i18n-swarm - autonomous code-side localization for English-only web apps (Next.js / Vue 3 / React)");
@@ -243,6 +322,16 @@ function usage() {
   log("  extract <dir>                     classify UI strings, write the catalog (no app changes)");
   log("  apply   <dir>                     rewire components + scaffold the i18n runtime (mutates)");
   log("  verify  <dir> [--no-install]      install + build + test the current state");
+  log("  audit   <dir> [--json] [--md]     read-only readiness report (no app changes):");
+  log("       hardcoded-string %, top files, auto-wire vs review estimate, i18n wired?,");
+  log("       drift-gate baseline. writes .i18nswarm/audit.md + audit.json.");
+  log("");
+  log("CI drift-gate (recurring):");
+  log("  check [<base>..<head>] [--repo dir] [--files a,b] [--json] [--no-suppress]");
+  log("       fail (exit 1) when a diff adds a NEW hardcoded user-facing UI string that is");
+  log("       not keyed, and print the keyed fix as a suggested diff (scoped to the new");
+  log("       strings only). no range = working tree vs HEAD. brand/code/decorative/dev-only");
+  log("       flags are suppressed (i18n-swarm.config.json extends them); --no-suppress shows raw.");
   log("");
   log("the full pass writes .i18nswarm/report.html (zine report + verdict card), card.svg, and review-queue.json");
 }
@@ -254,6 +343,12 @@ async function main() {
   const sub = hasCmd ? first : (first === undefined ? undefined : "run");
   const rest = hasCmd ? restArgs : (first === undefined ? [] : [first, ...restArgs]);
   const { pos, flags } = parseArgs(rest);
+  // `check` takes a git range (not a dir) as its positional, so it is routed before
+  // the generic <dir> resolution the other subcommands share.
+  if (sub === "check") {
+    try { cmdCheck(pos, flags); } catch (e) { log("ERROR: " + (e as Error).message); process.exitCode = 1; }
+    return;
+  }
   const dir = path.resolve(pos[0] ?? ".");
   try {
     const fw = (() => { try { return detectRepo(dir).framework; } catch { return "unknown"; } })();
@@ -263,6 +358,7 @@ async function main() {
       case "extract": isJsx ? cmdExtractJsx(dir) : cmdExtract(dir); break;
       case "apply": isJsx ? cmdApplyJsx(dir) : cmdApply(dir); break;
       case "verify": await cmdVerify(dir, !!flags["no-install"]); break;
+      case "audit": cmdAudit(dir, flags); break;
       case "run": isJsx ? await cmdRunJsx(dir) : await cmdRun(dir); break;
       default: usage(); process.exitCode = 0;
     }

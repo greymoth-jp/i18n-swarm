@@ -171,9 +171,11 @@ function addDep(repoDir: string, steps: string[]): void {
   const pkg = JSON.parse(fs.readFileSync(pj, "utf8"));
   pkg.dependencies = pkg.dependencies ?? {};
   if (!pkg.dependencies["next-intl"]) {
-    pkg.dependencies["next-intl"] = "^3.26.0";
+    // next-intl v4 is the first release whose peer range includes Next 16 (v3 caps at
+    // Next 15). Pinning v3 made the post-i18n install ERESOLVE on every current-Next app.
+    pkg.dependencies["next-intl"] = "^4.0.0";
     fs.writeFileSync(pj, JSON.stringify(pkg, null, 2) + "\n", "utf8");
-    steps.push("added next-intl@^3.26 to dependencies");
+    steps.push("added next-intl@^4.0 to dependencies");
   } else steps.push("next-intl already present");
 }
 

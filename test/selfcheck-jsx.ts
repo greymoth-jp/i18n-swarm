@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   hasLetter, norm, isVersionLike, isIconClass, isComponentTag,
   classifyText, classifyAttr, classifyExprString,
 } from "../src/classify-core.ts";
+import { scaffoldReact } from "../src/scaffold-react.ts";
 import { extractJsxFile, detectScope, fileI18nState } from "../src/extract-jsx.ts";
 import { rewriteJsxFile, jsxParseErrors } from "../src/rewire-jsx.ts";
 import { planBinding } from "../src/binding.ts";
@@ -54,15 +58,35 @@ check("classifyText: every branch", () => {
   assert.equal(classifyText("Visit", { inCode: false, iconParent: false, inSentence: true, parentTag: "p" })!.cls, "AMBIGUOUS");
   assert.equal(classifyText("Save", { inCode: false, iconParent: false, inSentence: false, parentTag: "button" })!.cls, "HIGH");
 });
-check("classifyAttr: text-attr HIGH, never-copy null, component-prop AMBIGUOUS, host-prop null", () => {
+check("classifyAttr: text-attr HIGH, never-copy null, host-prop null", () => {
   assert.equal(classifyAttr("placeholder", "Your name", "input")!.cls, "HIGH");
   assert.equal(classifyAttr("alt", "A cat", "img")!.cls, "HIGH");
   assert.equal(classifyAttr("href", "/about", "a"), null);
   assert.equal(classifyAttr("className", "btn primary", "div"), null);
   assert.equal(classifyAttr("title", "Open settings", "div")!.cls, "HIGH", "title is a user-facing attr");
   assert.equal(classifyAttr("title", "123", "div"), null, "no-letter title value is not copy");
-  assert.equal(classifyAttr("label", "Submit", "Button")!.cls, "AMBIGUOUS");
-  assert.equal(classifyAttr("data-foo", "Bar baz", "div"), null, "unknown host attr -> not copy");
+  assert.equal(classifyAttr("data-foo", "Bar baz", "div"), null, "data-* is never copy");
+});
+check("classifyAttr config props are NOT review noise: enum/css/url/data/class -> dropped", () => {
+  // config tokens that used to flood the review queue as AMBIGUOUS are now correctly dropped
+  assert.equal(classifyAttr("variant", "primary", "Button"), null, "style enum");
+  assert.equal(classifyAttr("size", "sm", "Button"), null, "size enum");
+  assert.equal(classifyAttr("align", "end", "Cell"), null, "layout enum");
+  assert.equal(classifyAttr("data-slot", "accordion-trigger", "Foo"), null, "data-* slot id");
+  assert.equal(classifyAttr("dataKey", "weightedPipeline", "Bar"), null, "recharts data key (camelCase)");
+  assert.equal(classifyAttr("videoSrc", "https://x.com/v.mp4", "Hero"), null, "url-bearing prop");
+  assert.equal(classifyAttr("eventColor", "var(--primary)", "Cal"), null, "css value");
+  assert.equal(classifyAttr("popoverClass", "rounded-md bg-popover", "Cal"), null, "*Class css list");
+  assert.equal(classifyAttr("position", "insideLeft", "Label"), null, "recharts position enum");
+});
+check("classifyAttr copy props ARE auto-handled when the value is prose", () => {
+  assert.equal(classifyAttr("label", "Actionable deals", "StatCard")!.cls, "HIGH", "multi-word label");
+  assert.equal(classifyAttr("label", "Nostalgia", "Card")!.cls, "HIGH", "capitalized real word");
+  assert.equal(classifyAttr("description", "Receive product updates", "Field")!.cls, "HIGH");
+  assert.equal(classifyAttr("pageTitle", "Billing & Plans", "Shell")!.cls, "HIGH");
+  assert.equal(classifyAttr("text", "Prev", "Marquee")!.cls, "HIGH");
+  // a copy-ish prop whose value is a bare lower-case token is NOT prose -> stays in review, never auto-wired
+  assert.equal(classifyAttr("label", "lg", "Icon")!.cls, "AMBIGUOUS");
 });
 check("classifyExprString: multiword phrase AMBIGUOUS, enum/single-token null", () => {
   assert.equal(classifyExprString("Welcome back")!.cls, "AMBIGUOUS");
@@ -85,10 +109,20 @@ check("JSX attribute: user-facing attr HIGH, technical attr ignored", () => {
   assert.equal(h[0].attrName, "placeholder");
   assert.equal(cs.filter((c) => c.attrName === "type").length, 0);
 });
-check("component prop string is AMBIGUOUS (never auto-rewired)", () => {
-  const amb = byCls(ex(wrap(`<Greeting message="You did it!" />`)), "AMBIGUOUS");
+check("known copy prop with a prose value is auto-handled HIGH", () => {
+  const h = byCls(ex(wrap(`<Greeting message="You did it!" />`)), "HIGH");
+  assert.equal(h.length, 1);
+  assert.equal(h[0].attrName, "message");
+});
+check("unknown prop with a prose value stays AMBIGUOUS (could be copy or a config string)", () => {
+  const amb = byCls(ex(wrap(`<Chart note="closed won / monthly target" />`)), "AMBIGUOUS");
   assert.equal(amb.length, 1);
-  assert.equal(amb[0].attrName, "message");
+  assert.equal(amb[0].attrName, "note");
+});
+check("config props on a component are dropped, not queued for review", () => {
+  const cs = ex(wrap(`<Button variant="primary" size="sm" data-slot="cta">Go</Button>`));
+  assert.equal(byCls(cs, "AMBIGUOUS").length, 0, "variant/size/data-slot are not copy");
+  assert.equal(byCls(cs, "HIGH").filter((c) => c.kind === "text").length, 1, "the label child is still HIGH");
 });
 check("interpolation: {var} sibling makes the text AMBIGUOUS (not a clean label)", () => {
   const cs = ex(wrap(`<span>{count} items left</span>`));
@@ -297,6 +331,95 @@ check("end-to-end mixed component: clean labels wired, prose/icon/version left i
   assert.ok(out.includes(`<a href="#">docs</a>`), "sentence fragment intact");
   assert.ok(out.includes(`<small>v2.3.1</small>`), "version intact");
   assert.equal(jsxParseErrors("App.tsx", out), 0);
+});
+
+// ============================================================================
+// 7. react-i18next path: binding hook + plain-React scaffold (Vite / CRA)
+// ============================================================================
+check("binding react-i18next: useTranslation() hook + import, never async/server", () => {
+  const src = `export default function Page(){\n  return <button>Save</button>;\n}`;
+  const cs = ex(src); assignKeys(cs);
+  const plan = planBinding("Page.tsx", src, byCls(cs, "HIGH").map((c) => c.start), "react-i18next");
+  assert.equal(plan.safe, true);
+  const texts = plan.edits.map((e) => e.text).join("|");
+  assert.match(texts, /import \{ useTranslation \} from 'react-i18next'/);
+  assert.match(texts, /const \{ t \} = useTranslation\(\);/);
+  assert.ok(!/next-intl/.test(texts), "no next-intl in the react path");
+  assert.ok(!/getTranslations/.test(texts), "no server hook in the react path");
+});
+check("binding react-i18next UNSAFE: async component cannot take the hook", () => {
+  const src = `export default async function Page(){ const d = await x(); return <h1>Welcome</h1>; }`;
+  const cs = ex(src); assignKeys(cs);
+  const plan = planBinding("Page.tsx", src, byCls(cs, "HIGH").map((c) => c.start), "react-i18next");
+  assert.equal(plan.safe, false);
+  assert.match(plan.reason, /async component cannot receive/);
+});
+
+const mkapp = (files: Record<string, string>) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "i18nswarm-react-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content, "utf8");
+  }
+  return dir;
+};
+const locales = { en: { "app.save": "Save", "app.email": "Email" }, ja: { "app.save": "Save", "app.email": "Email" }, translationTodo: [{ key: "app.save", en: "Save" }] };
+
+check("scaffoldReact (Vite/TS, no resolveJsonModule): inlines resources, wires <I18nextProvider>", () => {
+  const dir = mkapp({
+    "package.json": JSON.stringify({ name: "vite-ts", dependencies: { react: "^18.0.0" } }),
+    "tsconfig.app.json": JSON.stringify({ compilerOptions: { moduleResolution: "Bundler" } }),
+    "src/main.tsx": `import ReactDOM from 'react-dom/client';\nimport App from './App.tsx';\nReactDOM.createRoot(document.getElementById('root')!).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n`,
+  });
+  const r = scaffoldReact(dir, path.join(dir, "src"), locales, true);
+  const init = fs.readFileSync(path.join(dir, "src/i18n/index.ts"), "utf8");
+  assert.ok(!/from '\.\/locales/.test(init), "TS app w/o resolveJsonModule must inline, not import JSON");
+  assert.match(init, /const en: Record<string, string> =/);
+  assert.match(init, /useSuspense: false/);
+  const entry = fs.readFileSync(path.join(dir, "src/main.tsx"), "utf8");
+  assert.match(entry, /import i18n from '\.\/i18n'/);
+  assert.match(entry, /<I18nextProvider i18n=\{i18n\}><React\.StrictMode>/);
+  assert.match(entry, /<\/React\.StrictMode><\/I18nextProvider>/);
+  assert.equal(jsxParseErrors("main.tsx", entry), 0, "wired entry still parses");
+  const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+  assert.ok(pkg.dependencies["react-i18next"] && pkg.dependencies["i18next"], "deps added");
+  assert.ok(r.steps.some((s) => /index\.ts/.test(s)));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+check("scaffoldReact (JS/CRA-shape): writes index.js with JSON import, wires entry", () => {
+  const dir = mkapp({
+    "package.json": JSON.stringify({ name: "cra-js", dependencies: { react: "^18.0.0", "react-scripts": "5.0.0" } }),
+    "src/index.js": `import ReactDOM from 'react-dom/client';\nimport App from './App';\nReactDOM.createRoot(document.getElementById('root')).render(<App />);\n`,
+  });
+  scaffoldReact(dir, path.join(dir, "src"), locales, true);
+  assert.ok(fs.existsSync(path.join(dir, "src/i18n/index.js")), "JS app -> index.js");
+  const init = fs.readFileSync(path.join(dir, "src/i18n/index.js"), "utf8");
+  assert.match(init, /import en from '\.\/locales\/en\.json'/);
+  const entry = fs.readFileSync(path.join(dir, "src/index.js"), "utf8");
+  assert.match(entry, /<I18nextProvider i18n=\{i18n\}><App \/><\/I18nextProvider>/);
+  assert.equal(jsxParseErrors("index.js", entry), 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+check("scaffoldReact: idempotent + unusual entry -> review (no double-wire / no risk)", () => {
+  // already-wired entry: left untouched
+  const d1 = mkapp({
+    "package.json": JSON.stringify({ name: "a", dependencies: { react: "^18.0.0" } }),
+    "src/main.tsx": `import i18n from './i18n';\nimport ReactDOM from 'react-dom/client';\nReactDOM.createRoot(x).render(<App />);\n`,
+  });
+  const r1 = scaffoldReact(d1, path.join(d1, "src"), locales, true);
+  assert.ok(r1.steps.some((s) => /already wires i18n/.test(s)));
+  fs.rmSync(d1, { recursive: true, force: true });
+  // no render() call found: provider wiring punted to the review queue, init still written
+  const d2 = mkapp({
+    "package.json": JSON.stringify({ name: "b", dependencies: { react: "^18.0.0" } }),
+    "tsconfig.json": JSON.stringify({ compilerOptions: {} }),
+    "src/main.tsx": `export const x = 1;\n`,
+  });
+  const r2 = scaffoldReact(d2, path.join(d2, "src"), locales, true);
+  assert.ok(fs.existsSync(path.join(d2, "src/i18n/index.ts")), "init still scaffolded");
+  assert.ok(r2.warnings.some((w) => /no React entry|render\(\) root element/.test(w)), "entry wiring left for review");
+  fs.rmSync(d2, { recursive: true, force: true });
 });
 
 process.stdout.write(Buffer.from(`\nJSX SELFCHECK PASSED: ${n} checks\n`, "utf8"));

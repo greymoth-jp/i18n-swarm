@@ -1,3 +1,6 @@
 targets/
 node_modules/
 package-lock.json
+dist/
+*.tgz
+.i18nswarm/

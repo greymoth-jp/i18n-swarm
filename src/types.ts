@@ -15,6 +15,7 @@ export interface Candidate {
   cls: Klass;
   reason: string;
   key?: string; // assigned for HIGH candidates
+  decorative?: boolean; // enclosing element is aria-hidden / role=presentation|none (screen-reader-hidden)
 }
 
 export interface ExtractReport {
