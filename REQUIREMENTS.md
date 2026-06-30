@@ -79,10 +79,30 @@ Findings (verified, not assumed):
 - **The build/typecheck gate is the real trust signal.** It caught a malformed
   `async export default function` edit (TS1029 / SWC syntax error) that a lightweight
   in-process parse check (createSourceFile/transpileModule/createProgram syntactic) all
-  missed. The async-insert position bug is fixed; the gate remains authoritative.
-- **Server-vs-Client binding is the fragile, framework-specific part.** Call-site rewrite
-  generalizes cleanly (offset-verified); the binding (client `useTranslations()` vs
-  server `await getTranslations()` + async conversion) is safe only for common component
-  shapes. Unusual shapes, files already wiring `t`, and config/provider wiring are left
-  to the review queue. End-to-end validated green on a controlled Next.js+next-intl app:
-  tsc clean, `next build` ok, prerendered HTML shows real English (server + client), not keys.
+  missed, and it caught the binding bug below that every static check passed. The gate is
+  authoritative; nothing is reported safe that the gate has not cleared.
+- **Binding is decided by async-ness, not by `'use client'`.** The earlier planner chose
+  the server binding (`await getTranslations()` + async conversion) for any file without a
+  `'use client'` directive. That over-marks shared/leaf components: a file with no directive
+  of its own still runs on the client when a client component imports it (`logo.tsx` pulled
+  in by the client `header.tsx`), and `getTranslations` there crashes the prerender
+  (`getTranslations is not supported in Client Components`). Fix: `useTranslations()` works
+  in Client Components and in synchronous Server Components, so it is the safe binding
+  everywhere; only an already-`async` component gets `await getTranslations()`. The planner
+  no longer makes anything async. This also removed the async-insert fragility class.
+- **The standard next-intl App-Router wiring is now scaffolded, not deferred.**
+  `scaffold-next.ts` wraps `next.config.*` with `createNextIntlPlugin` (AST-located export,
+  CJS `module.exports` or ESM `export default`), writes `i18n/request.ts` (getRequestConfig,
+  message path computed relative to its own location so the `src/` layout works too), and
+  wires `<NextIntlClientProvider messages={getMessages()}>` around the root layout's `<body>`
+  (making it async if needed). Every edit is offset-surgical and reparse-verified; an
+  unexpected config/layout shape is left in the review queue.
+- **Green, merge-ready for the common case (verified, not assumed).** Full end-to-end pass
+  on two real, unmodified OSS apps: `cruip/open-react-template` (99 strings / 13 files /
+  84.6% / 0 corruptions) and `shadcn-ui/next-template` (12 / 4 / 66.7% / 0). Both reach
+  `next build` green; the second is `tsc --noEmit` clean too; prerendered HTML shows real
+  English on every route, including the three `(auth)` pages, not keys. Two already-i18n'd
+  apps (`Skolaczk/next-starter`, `ixartz/Next-js-Boilerplate`) are correctly refused. What
+  stays in review is now only genuine human work (prose + ja translations), with no
+  framework-wiring debt. App-specific shapes (i18n routing, client-component layout, unusual
+  exports) still fall to the queue by design.

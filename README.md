@@ -35,13 +35,23 @@ Rewrites are offset-surgical. Each edit is checked against the live source befor
 applied, and the rewritten file is re-parsed, so a bad edit is reverted rather than
 allowed to mangle the file.
 
-For Next.js, the binding is the part that standard tools get wrong. A Client component
-needs `useTranslations()`; a Server component needs `await getTranslations()` and has to
-become async. The agent injects the right one for the common component shapes
-(block-bodied function or arrow components) and leaves the rest — arrow expression
+For Next.js, the binding is the part that standard tools get wrong, and the trap is the
+`'use client'` directive. A file with no directive of its own is not necessarily a Server
+component: when a Client component imports it, it runs on the client, and the server-only
+`await getTranslations()` crashes the prerender there. So the agent binds on async-ness
+instead. `useTranslations()` works in Client components and in synchronous Server
+components, so it is the safe binding everywhere; only an already-async component gets
+`await getTranslations()`. Nothing is made async. It injects this for the common component
+shapes (block-bodied function or arrow components) and leaves the rest — arrow expression
 bodies, files that already wire their own `t`, copy that lives outside a component — in
 the review queue, untouched. Messages are written nested, because next-intl resolves a
 dotted key against a nested object and silently returns the key itself for a flat one.
+
+The framework wiring is scaffolded, not left as a note: the `createNextIntlPlugin` wrap in
+`next.config` (CommonJS or ESM), the `i18n/request.ts` request config, and the
+`NextIntlClientProvider` around the root layout's `<body>`. Each is AST-located and
+reparse-verified, and an unexpected config or layout shape is left for review rather than
+edited blind.
 
 Translation quality is deliberately out of scope. `ja.json` is seeded with the English
 source as a fallback and a `translation-todo.json` manifest is written for a human or an
@@ -72,14 +82,16 @@ versus prose with inline markup and interpolation. The conservative call — nev
 mixed sentence, never auto-wrap an interpolated phrase — is what keeps corruptions at
 zero, and it is also what caps the auto-handled share.
 
-The build-and-test gate is the trust mechanism, and it earns it: in testing it caught a
-malformed edit that a lightweight in-process parse check missed entirely. A single-file
-parse is a useful pre-filter but not a substitute for the real compile. So the honest
-shape of the tool is a safe subset behind a build gate: extract, classify, write the
-catalog, rewrite the call sites it is sure about, wire the binding for the common
-component shapes, and hand everything else — prose that needs splitting, unusual
-component shapes, the framework config and provider wiring, and the Japanese itself — to
-a review queue.
+The build gate is the trust mechanism, and it earns it: in testing it caught a malformed
+edit that a lightweight in-process parse check missed entirely, and it caught the binding
+bug above that every static check passed. A single-file parse is a useful pre-filter but
+not a substitute for the real compile. For the common next-intl App-Router case (single
+locale, no routing, a standard root layout) the full pass now lands green and merge-ready:
+on `cruip/open-react-template` (99 strings, 13 files, 84.6%, 0 corruptions) and
+`shadcn-ui/next-template` (12, 4, 66.7%, 0) the build is green, the prerendered HTML shows
+real English on every route, and what is left for a human is only prose that needs
+splitting and the Japanese itself. App-specific shapes — i18n routing, a client-component
+layout, an unusual export — still fall to the review queue by design.
 
 ## License
 

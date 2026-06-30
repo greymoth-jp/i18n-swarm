@@ -190,23 +190,41 @@ check("binding CLIENT: injects useTranslations() + import, no async", () => {
   assert.match(texts, /const t = useTranslations\(\);/);
   assert.ok(!texts.includes("async"));
 });
-check("binding SERVER: injects getTranslations() (awaited) + makes component async", () => {
+check("binding NON-ASYNC server (no 'use client'): useTranslations(), never getTranslations, never async", () => {
+  // A shared/leaf component a Client Component may import: file has no 'use client', but it
+  // can still run on the client, so getTranslations() would crash at prerender. useTranslations
+  // works in both contexts -> it is the safe binding, and the component stays non-async.
   const src = `export default function Page(){\n  return <button>Save</button>;\n}`;
   const cs = ex(src); assignKeys(cs);
   const plan = planBinding("Page.tsx", src, byCls(cs, "HIGH").map((c) => c.start));
   assert.equal(plan.safe, true);
   assert.equal(plan.scope, "server");
-  const texts = plan.edits.map((e) => e.text);
-  assert.ok(texts.some((t) => /getTranslations\(\)/.test(t)));
-  assert.ok(texts.some((t) => /await/.test(t)));
-  assert.ok(texts.includes("async "), "non-async server component is made async");
+  const texts = plan.edits.map((e) => e.text).join("|");
+  assert.match(texts, /import \{ useTranslations \} from 'next-intl'/);
+  assert.match(texts, /const t = useTranslations\(\);/);
+  assert.ok(!/getTranslations/.test(texts), "no server-only getTranslations in a possibly-client component");
+  assert.ok(!plan.edits.map((e) => e.text).includes("async "), "component is never made async");
 });
-check("binding SERVER already async: no extra async insert", () => {
+check("binding ASYNC server component: await getTranslations(), no async insert", () => {
   const src = `export default async function Page(){\n  const d = await load();\n  return <h1>Welcome</h1>;\n}`;
   const cs = ex(src); assignKeys(cs);
   const plan = planBinding("Page.tsx", src, byCls(cs, "HIGH").map((c) => c.start));
   assert.equal(plan.safe, true);
-  assert.ok(!plan.edits.map((e) => e.text).includes("async "));
+  const texts = plan.edits.map((e) => e.text).join("|");
+  assert.match(texts, /import \{ getTranslations \} from 'next-intl\/server'/);
+  assert.match(texts, /const t = await getTranslations\(\);/);
+  assert.ok(!plan.edits.map((e) => e.text).includes("async "), "already async -> no extra async insert");
+});
+check("binding MIXED file: sync component gets useTranslations, async gets getTranslations", () => {
+  const src = `export function A(){ return <button>One</button>; }\nexport async function B(){ const d = await x(); return <h1>Two</h1>; }`;
+  const cs = ex(src); assignKeys(cs);
+  const plan = planBinding("M.tsx", src, byCls(cs, "HIGH").map((c) => c.start));
+  assert.equal(plan.safe, true);
+  const texts = plan.edits.map((e) => e.text).join("|");
+  assert.match(texts, /const t = useTranslations\(\);/);
+  assert.match(texts, /const t = await getTranslations\(\);/);
+  assert.match(texts, /from 'next-intl'/);
+  assert.match(texts, /from 'next-intl\/server'/);
 });
 check("binding UNSAFE: file already uses a translation hook", () => {
   const src = `'use client'\nimport {useTranslations} from 'next-intl'\nexport default function P(){const t=useTranslations();return <button>Save</button>;}`;

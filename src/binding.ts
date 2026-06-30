@@ -10,7 +10,7 @@ export interface BindingPlan {
   /** safe = every rewired component got a t binding through a supported code shape. */
   safe: boolean;
   reason: string;
-  edits: Edit[]; // import + (async) + const t injections; merged with rewrite edits by caller
+  edits: Edit[]; // import + const t injections; merged with rewrite edits by caller
 }
 
 const COMPONENT_KINDS = new Set([
@@ -20,9 +20,8 @@ const COMPONENT_KINDS = new Set([
 ]);
 
 interface CompFn {
-  node: ts.FunctionLikeDeclaration;
   bodyOpenBrace: number; // offset just AFTER the opening "{" of the block body
-  asyncInsert: number | null; // offset to insert "async " (null if already async / N/A)
+  isAsync: boolean;
   start: number;
   end: number;
 }
@@ -49,7 +48,7 @@ function isComponentShaped(node: ts.FunctionLikeDeclaration, sf: ts.SourceFile):
     return isDefault || (!!name && /^[A-Z]/.test(name));
   }
   // arrow / function expr: look at the binding it is assigned to
-  let p: ts.Node | undefined = node.parent;
+  const p: ts.Node | undefined = node.parent;
   if (p && ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) return /^[A-Z]/.test(p.name.getText(sf));
   if (p && ts.isExportAssignment(p)) return true; // export default () => ...
   return false;
@@ -63,20 +62,7 @@ function collectComponentFns(sf: ts.SourceFile): CompFn[] {
       const body = fn.body;
       if (body && ts.isBlock(body) && isComponentShaped(fn, sf) && containsJsx(fn)) {
         const isAsync = (ts.getModifiers(fn) ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
-        let asyncInsert: number | null = null;
-        if (!isAsync) {
-          // `async` must sit AFTER export/default modifiers and BEFORE `function`. For a
-          // declaration/expression that means the `function` keyword's position; for an
-          // arrow it means the start of the (params).  Inserting at fn.getStart() for a
-          // modified declaration would wrongly produce `async export default function`.
-          if (ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn)) {
-            const kw = fn.getChildren(sf).find((c) => c.kind === ts.SyntaxKind.FunctionKeyword);
-            asyncInsert = kw ? kw.getStart(sf) : fn.getStart(sf);
-          } else {
-            asyncInsert = fn.getStart(sf); // arrow: before "("
-          }
-        }
-        out.push({ node: fn, bodyOpenBrace: body.getStart(sf) + 1, asyncInsert, start: fn.getStart(sf), end: fn.getEnd() });
+        out.push({ bodyOpenBrace: body.getStart(sf) + 1, isAsync, start: fn.getStart(sf), end: fn.getEnd() });
       }
     }
     ts.forEachChild(n, visit);
@@ -85,35 +71,48 @@ function collectComponentFns(sf: ts.SourceFile): CompFn[] {
   return out;
 }
 
-function importLineFor(target: Target, scope: ComponentScope): string {
+type Kind = "use" | "get"; // useTranslations (sync, client-safe) | getTranslations (async server)
+
+/**
+ * Which binding a component needs. The right axis is async-ness, NOT the file-level
+ * 'use client' directive: next-intl's `useTranslations()` works in Client Components AND
+ * in synchronous Server Components, so it is the safe choice even for a shared/leaf
+ * component that a Client Component imports (where the file has no 'use client' of its own
+ * yet runs on the client). `getTranslations()` is reserved for components that are already
+ * async (those are server-only by construction, so it is safe there). This is what fixes
+ * the "getTranslations is not supported in Client Components" prerender failure.
+ */
+function bindingKind(target: Target, isAsync: boolean): Kind {
+  if (target === "react-i18next") return "use";
+  return isAsync ? "get" : "use";
+}
+
+function importTextFor(target: Target, kind: Kind): string {
   if (target === "react-i18next") return "import { useTranslation } from 'react-i18next';\n";
-  return scope === "client"
+  return kind === "use"
     ? "import { useTranslations } from 'next-intl';\n"
     : "import { getTranslations } from 'next-intl/server';\n";
 }
 
-function bindingLineFor(target: Target, scope: ComponentScope): string {
-  if (target === "react-i18next") return "\n  const { t } = useTranslation();";
-  return scope === "client" ? "\n  const t = useTranslations();" : "\n  const t = await getTranslations();";
+function alreadyImported(target: Target, kind: Kind, source: string): boolean {
+  if (target === "react-i18next") return /import\s*\{[^}]*\buseTranslation\b[^}]*\}\s*from\s*['"]react-i18next['"]/.test(source);
+  if (kind === "use") return /import\s*\{[^}]*\buseTranslations\b[^}]*\}\s*from\s*['"]next-intl['"]/.test(source);
+  return /import\s*\{[^}]*\bgetTranslations\b[^}]*\}\s*from\s*['"]next-intl\/server['"]/.test(source);
 }
 
-function importEdit(target: Target, scope: ComponentScope, source: string): Edit | null {
-  if (target === "react-i18next" && /import\s*\{[^}]*\buseTranslation\b[^}]*\}\s*from\s*['"]react-i18next['"]/.test(source)) return null;
-  if (target === "next-intl" && scope === "client" && /import\s*\{[^}]*\buseTranslations\b[^}]*\}\s*from\s*['"]next-intl['"]/.test(source)) return null;
-  if (target === "next-intl" && scope === "server" && /import\s*\{[^}]*\bgetTranslations\b[^}]*\}\s*from\s*['"]next-intl\/server['"]/.test(source)) return null;
-  const line = importLineFor(target, scope);
-  // insert after a 'use client' directive if present, else at file top
-  const m = /^\s*(['"])use client\1;?[^\n]*\n/.exec(source);
-  const at = m ? m.index + m[0].length : 0;
-  return { start: at, end: at, text: line };
+function bindingLine(target: Target, kind: Kind): string {
+  if (target === "react-i18next") return "\n  const { t } = useTranslation();";
+  return kind === "use" ? "\n  const t = useTranslations();" : "\n  const t = await getTranslations();";
 }
 
 /**
- * Plan the next-intl binding edits for a file that has HIGH candidates at `highOffsets`.
+ * Plan the binding edits for a file that has HIGH candidates at `highOffsets`.
  * Returns safe=true only when every component function that owns a rewired string is a
- * supported shape (block-body component) and can receive a `t` binding. Anything else
+ * supported shape (block-body component) that can receive a `t` binding. Anything else
  * (arrow expression-body component, HOC-wrapped, copy outside any component fn, a file
- * that already wires its own t) is reported safe=false with a reason for the review queue.
+ * already wiring its own `t`) is reported safe=false with a reason for the review queue.
+ * Bindings never make a component async; a non-async component gets the client-safe
+ * `useTranslations()` hook, an already-async one gets `await getTranslations()`.
  */
 export function planBinding(file: string, source: string, highOffsets: number[], target: Target = "next-intl"): BindingPlan {
   // react-i18next has no server variant; everything is a client-style hook.
@@ -136,20 +135,26 @@ export function planBinding(file: string, source: string, highOffsets: number[],
     }
     owning.add(owner);
   }
+  // react-i18next is a hook only; an async component can never receive it.
+  if (target === "react-i18next" && [...owning].some((c) => c.isAsync)) {
+    return { scope, safe: false, reason: "async component cannot receive the react-i18next hook - manual binding", edits: [] };
+  }
 
   const edits: Edit[] = [];
-  const imp = importEdit(target, scope, source);
-  if (imp) edits.push(imp);
-  const binding = bindingLineFor(target, scope);
-  const serverAsync = target === "next-intl" && scope === "server";
-  for (const c of owning) {
-    edits.push({ start: c.bodyOpenBrace, end: c.bodyOpenBrace, text: binding });
-    if (serverAsync && c.asyncInsert !== null) {
-      edits.push({ start: c.asyncInsert, end: c.asyncInsert, text: "async " });
-    }
-  }
+  const kinds = new Set<Kind>([...owning].map((c) => bindingKind(target, c.isAsync)));
+  const m = /^\s*(['"])use client\1;?[^\n]*\n/.exec(source);
+  const at = m ? m.index + m[0].length : 0;
+  let importText = "";
+  for (const k of kinds) if (!alreadyImported(target, k, source)) importText += importTextFor(target, k);
+  if (importText) edits.push({ start: at, end: at, text: importText });
+  for (const c of owning) edits.push({ start: c.bodyOpenBrace, end: c.bodyOpenBrace, text: bindingLine(target, bindingKind(target, c.isAsync)) });
+
+  const usedGet = [...owning].some((c) => bindingKind(target, c.isAsync) === "get");
+  const usedUse = [...owning].some((c) => bindingKind(target, c.isAsync) === "use");
   const reason = target === "react-i18next"
     ? "react-i18next: useTranslation() injected"
-    : scope === "client" ? "client component: useTranslations() injected" : "server component: getTranslations() injected (async)";
+    : usedGet && usedUse ? "mixed: useTranslations() for sync components, await getTranslations() for async ones"
+      : usedGet ? "async server component: await getTranslations() injected"
+        : "useTranslations() injected (client + synchronous server safe)";
   return { scope, safe: true, reason, edits };
 }
