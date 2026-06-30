@@ -1,0 +1,25 @@
+{
+  "name": "i18n-swarm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic localization agent for English-only Vue 3 apps: extracts UI strings, wires vue-i18n, generates locale files, rewires components, and self-verifies that the app still builds and tests stay green.",
+  "author": "greymoth",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "selfcheck": "node test/selfcheck.ts",
+    "typecheck": "tsc --noEmit",
+    "detect": "node src/cli.ts detect",
+    "extract": "node src/cli.ts extract",
+    "verify": "node src/cli.ts verify",
+    "run": "node src/cli.ts run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@vue/compiler-sfc": "^3.5.39",
+    "typescript": "^5.6.0"
+  }
+}
