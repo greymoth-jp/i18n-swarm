@@ -9,11 +9,15 @@
   "engines": {
     "node": ">=22.6.0"
   },
+  "bin": {
+    "i18n-swarm": "src/cli.ts"
+  },
   "scripts": {
-    "selfcheck": "node test/selfcheck.ts",
+    "selfcheck": "node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts",
     "typecheck": "tsc --noEmit",
     "detect": "node src/cli.ts detect",
     "extract": "node src/cli.ts extract",
+    "apply": "node src/cli.ts apply",
     "verify": "node src/cli.ts verify",
     "run": "node src/cli.ts run"
   },
