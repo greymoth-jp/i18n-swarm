@@ -35,12 +35,38 @@ function write(rel: string, body: string) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, body, "utf8");
 }
+
+// A second, unrelated git repo, used as a DIFFERENT process cwd to prove that
+// `--repo <dir>` (space form) targets <dir> and not the working directory. The fixture's
+// commit SHAs do not exist here, so a run that mistakenly falls back to this cwd cannot
+// see the fixture's newly-added string.
+const cwd2 = fs.mkdtempSync(path.join(os.tmpdir(), "i18nswarm-cwd-"));
+const cliPath = path.join(import.meta.dirname, "..", "src", "cli.ts");
+function runCli(args: string[], cwd: string): { code: number; out: string } {
+  try {
+    const out = execFileSync(process.execPath, [cliPath, ...args], { cwd, encoding: "utf8" });
+    return { code: 0, out };
+  } catch (e) {
+    const err = e as { status?: number; stdout?: string; stderr?: string };
+    return { code: typeof err.status === "number" ? err.status : 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+  }
+}
 try {
   g("init", "-q");
   g("config", "user.email", "t@example.com");
   g("config", "user.name", "t");
   g("config", "core.autocrlf", "false");
   g("config", "commit.gpgsign", "false");
+
+  // seed the second repo with unrelated history (so the fixture's SHAs never resolve here)
+  const g2 = (...args: string[]) => execFileSync("git", args, { cwd: cwd2, encoding: "utf8" });
+  g2("init", "-q");
+  g2("config", "user.email", "t@example.com");
+  g2("config", "user.name", "t");
+  g2("config", "commit.gpgsign", "false");
+  fs.writeFileSync(path.join(cwd2, "unrelated.txt"), "x", "utf8");
+  g2("add", "-A");
+  g2("commit", "-qm", "unrelated");
 
   // baseline: a properly-keyed client component (already i18n'd) + one pre-existing
   // hardcoded string we will leave untouched (must NOT be flagged later).
@@ -187,8 +213,35 @@ try {
     assert.ok(res.totalFlags > 1, "without suppression the brand/enum/og-image strings fail too");
     assert.equal(res.totalSuppressed, 0);
   });
+
+  // ---------------------------------------------------------------------------
+  // 3. CLI arg-parser: `--repo <dir>` (space form) must target <dir>, not the cwd.
+  //    Run the real binary from an UNRELATED repo (cwd2). Before the parser fix, the
+  //    space form dropped the value, the run fell back to cwd2, the fixture's SHAs did
+  //    not resolve there, and the newly-added string was never reported.
+  // ---------------------------------------------------------------------------
+  check("CLI `--repo <dir>` (space form) targets <dir>, not the process cwd", () => {
+    const r = runCli(["check", `${base}..${headBad}`, "--repo", tmp], cwd2);
+    assert.equal(r.code, 1, "the gate must reach the fixture and FAIL (exit 1)");
+    assert.match(r.out, /Welcome to our store/, "must flag the fixture's newly-added string");
+    assert.match(r.out, /src[\\/]Page\.tsx/, "must reference the fixture file, proving it targeted <dir>");
+  });
+
+  check("CLI `--repo=<dir>` (equals form) targets <dir> identically", () => {
+    const r = runCli(["check", `${base}..${headBad}`, `--repo=${tmp}`], cwd2);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /Welcome to our store/);
+    assert.match(r.out, /src[\\/]Page\.tsx/);
+  });
+
+  check("CLI: a keyed diff via `--repo <dir>` (space form) PASSES (exit 0)", () => {
+    const r = runCli(["check", `${base}..${headGood}`, "--repo", tmp], cwd2);
+    assert.equal(r.code, 0, "keyed-only diff must pass");
+    assert.match(r.out, /PASS/);
+  });
 } finally {
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { fs.rmSync(cwd2, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
 process.stdout.write(Buffer.from(`\nCHECK SELFCHECK PASSED: ${n} checks\n`, "utf8"));

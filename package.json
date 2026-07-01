@@ -1,14 +1,16 @@
 {
   "name": "i18n-swarm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
-  "description": "Deterministic code-side i18n agent for English-only web apps: extracts UI strings, scaffolds next-intl / vue-i18n / react-i18next, rewires components, and self-verifies that the app still builds and tests stay green.",
+  "description": "CI gate that fails a PR when it adds a hardcoded UI string with no translation key (Next.js / Vue / React), diff-scoped with a keyed-fix patch. Ships a one-time retrofit verified by a real build.",
   "author": "greymoth",
   "license": "MIT",
   "keywords": [
     "i18n",
     "internationalization",
     "localization",
+    "ci",
+    "github-action",
     "next-intl",
     "vue-i18n",
     "react-i18next",

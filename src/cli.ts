@@ -15,15 +15,29 @@ import fs from "node:fs";
 function log(...a: unknown[]) { process.stdout.write(Buffer.from(a.join(" ") + "\n", "utf8")); }
 function hr() { log("-".repeat(68)); }
 
+// Flags that carry a value. These accept both `--flag=value` and the space-separated
+// `--flag value` form. Every other `--flag` is a boolean switch. A bare (non-"--")
+// argument is always positional (for `check` that is the git range), and a value-flag
+// never swallows one: the following token is taken as a value only when it is present
+// and is not itself a `--flag`.
+const VALUE_FLAGS = new Set(["repo", "files"]);
+
 function parseArgs(argv: string[]) {
   const pos: string[] = [];
   const flags: Record<string, boolean | string> = {};
-  for (const a of argv) {
-    if (a.startsWith("--")) {
-      const eq = a.indexOf("=");
-      if (eq >= 0) flags[a.slice(2, eq)] = a.slice(eq + 1);
-      else flags[a.slice(2)] = true;
-    } else pos.push(a);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith("--")) { pos.push(a); continue; }
+    const eq = a.indexOf("=");
+    if (eq >= 0) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
+    const name = a.slice(2);
+    const next = argv[i + 1];
+    if (VALUE_FLAGS.has(name) && next !== undefined && !next.startsWith("--")) {
+      flags[name] = next;
+      i++; // consume the value token
+    } else {
+      flags[name] = true;
+    }
   }
   return { pos, flags };
 }
