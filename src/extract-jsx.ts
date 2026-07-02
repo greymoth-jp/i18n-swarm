@@ -64,7 +64,7 @@ function innerTextSpan(node: ts.JsxText, sf: ts.SourceFile, source: string): { s
   return { start: s0 + lead, end: e0 - trail, raw: full.slice(lead, full.length - trail) };
 }
 
-function pushAttrs(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement, sf: ts.SourceFile, out: Candidate[]): void {
+function pushAttrs(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement, sf: ts.SourceFile, out: Candidate[], decorative: boolean): void {
   const tag = tagOf(el, sf);
   for (const a of el.attributes.properties) {
     if (!ts.isJsxAttribute(a)) continue; // spread attr {...props}: skip
@@ -76,6 +76,7 @@ function pushAttrs(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement, sf: ts.S
     out.push({
       file: "", kind: "attr", attrName: name, tag, text: norm(init.text),
       raw: a.getText(sf), start: a.getStart(sf), end: a.getEnd(), cls: d.cls, reason: d.reason,
+      decorative,
     });
   }
 }
@@ -99,28 +100,43 @@ function walk(node: ts.Node, ctx: Ctx, sf: ts.SourceFile, source: string, out: C
     return;
   }
   if (ts.isJsxExpression(node)) {
-    // {expression}: never auto-rewired. Surface a standalone natural-language string
-    // literal for review; everything else (identifiers, calls, ternaries) is ignored.
+    // {expression}: a bare string/template literal is surfaced for review (never
+    // auto-rewired -- see classifyExprString). Anything else is walked generically:
+    // the JsxExpression node itself carries no text, but its subtree can contain a real
+    // JsxElement/JsxSelfClosingElement/JsxFragment -- e.g. `{cond && <X/>}`,
+    // `{a ? <X/> : <Y/>}`, `{items.map(i => <X/>)}` -- and those must be visited with
+    // the SAME ctx as any other child, or the text/attributes inside them are silently
+    // invisible to the classifier. `walk()` already knows how to resolve every node kind
+    // it can encounter along the way (arrow function bodies, call arguments, ternary
+    // branches, ...) via its generic forEachChild fallback below, so no expression-kind
+    // needs special-casing here; offsets are read straight off the real AST nodes, so
+    // line/offset tracking is unaffected.
     const e = node.expression;
-    if (e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e))) {
+    if (!e) return;
+    if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) {
       const d = classifyExprString(e.text);
       if (d) out.push({ file: "", kind: "text", tag: ctx.parentTag, text: norm(e.text), raw: e.getText(sf), start: e.getStart(sf), end: e.getEnd(), cls: d.cls, reason: d.reason });
+      return;
     }
+    walk(e, ctx, sf, source, out);
     return;
   }
   if (ts.isJsxElement(node)) {
     const open = node.openingElement;
     const tag = tagOf(open, sf);
-    pushAttrs(open, sf, out);
     const low = tag.toLowerCase();
     const childCode = ctx.inCode || CODE_TAGS.has(low);
     const iconParent = isIconClass(classNameOf(open.attributes, sf));
+    // aria-hidden/role=presentation on THIS element (or inherited from an ancestor) makes
+    // its own attributes decorative too, not just its text children.
     const decorative = ctx.decorative || isDecorativeEl(open.attributes, sf);
+    pushAttrs(open, sf, out, decorative);
     walkChildren(node.children, tag, { inSentence: ctx.inSentence, inCode: childCode, parentTag: tag, iconParent, decorative }, sf, source, out);
     return;
   }
   if (ts.isJsxSelfClosingElement(node)) {
-    pushAttrs(node, sf, out);
+    const decorative = ctx.decorative || isDecorativeEl(node.attributes, sf);
+    pushAttrs(node, sf, out, decorative);
     return;
   }
   if (ts.isJsxFragment(node)) {
