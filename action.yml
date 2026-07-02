@@ -61,9 +61,11 @@ runs:
         PUSH_AFTER: ${{ github.sha }}
       run: |
         set -uo pipefail
-        # No `-e` here: the check's own exit code has to survive past this step (a
-        # non-zero code from `npx` under `-e` would kill the step immediately, before
-        # the PR-comment step below ever gets a chance to run).
+        # GitHub Actions invokes `shell: bash` steps as `bash --noprofile --norc -eo
+        # pipefail {0}`, so errexit is ON regardless of the flags above. Explicitly turn
+        # it OFF: the check exits 1 on a real violation, and that non-zero code has to
+        # survive to `CODE=$?` (and the PR-comment step) instead of killing this step.
+        set +e
 
         # Optional: place a suppression config where the check auto-discovers it.
         if [ -n "${INPUT_CONFIG}" ]; then
