@@ -50,7 +50,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "selfcheck": "node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts",
+    "selfcheck": "node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts && node test/selfcheck-pr-comment.ts",
     "detect": "node src/cli.ts detect",
     "extract": "node src/cli.ts extract",
     "apply": "node src/cli.ts apply",
@@ -58,7 +58,7 @@
     "audit": "node src/cli.ts audit",
     "check": "node src/cli.ts check",
     "run": "node src/cli.ts run",
-    "prepublishOnly": "tsc --noEmit && node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts && tsc -p tsconfig.build.json"
+    "prepublishOnly": "tsc --noEmit && node test/selfcheck.ts && node test/selfcheck-jsx.ts && node test/selfcheck-report.ts && node test/selfcheck-audit.ts && node test/selfcheck-check.ts && node test/selfcheck-suppress.ts && node test/selfcheck-pr-comment.ts && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@vue/compiler-sfc": "^3.5.39",

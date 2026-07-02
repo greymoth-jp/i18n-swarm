@@ -9,6 +9,7 @@ import {
   buildReviewQueue, verdictCardSvg, reportHtml, summaryLine, type ProductSummary,
 } from "./report.ts";
 import { runCheck } from "./check.ts";
+import { buildPrComment } from "./pr-comment.ts";
 import { auditRepo, auditMarkdown } from "./audit.ts";
 import fs from "node:fs";
 
@@ -20,7 +21,7 @@ function hr() { log("-".repeat(68)); }
 // argument is always positional (for `check` that is the git range), and a value-flag
 // never swallows one: the following token is taken as a value only when it is present
 // and is not itself a `--flag`.
-const VALUE_FLAGS = new Set(["repo", "files"]);
+const VALUE_FLAGS = new Set(["repo", "files", "comment"]);
 
 function parseArgs(argv: string[]) {
   const pos: string[] = [];
@@ -256,6 +257,16 @@ function cmdCheck(pos: string[], flags: Record<string, boolean | string>) {
   const noSuppress = flags["no-suppress"] === true;
   const res = runCheck({ range, repo, files, noSuppress });
 
+  // `--comment <path>`: write the sticky PR-comment markdown for the composite action to
+  // post/update. A clean result removes any stale file instead, which is how the caller
+  // (action.yml) tells "delete the existing comment" apart from "post/update it".
+  if (typeof flags["comment"] === "string") {
+    const commentPath = flags["comment"] as string;
+    const md = buildPrComment(res);
+    if (md) fs.writeFileSync(commentPath, md, "utf8");
+    else { try { fs.unlinkSync(commentPath); } catch { /* nothing to remove */ } }
+  }
+
   if (flags["json"]) { log(JSON.stringify(res, null, 2)); process.exitCode = res.pass ? 0 : 1; return; }
 
   hr();
@@ -342,10 +353,13 @@ function usage() {
   log("");
   log("CI drift-gate (recurring):");
   log("  check [<base>..<head>] [--repo dir] [--files a,b] [--json] [--no-suppress]");
+  log("        [--comment <path>]");
   log("       fail (exit 1) when a diff adds a NEW hardcoded user-facing UI string that is");
   log("       not keyed, and print the keyed fix as a suggested diff (scoped to the new");
   log("       strings only). no range = working tree vs HEAD. brand/code/decorative/dev-only");
   log("       flags are suppressed (i18n-swarm.config.json extends them); --no-suppress shows raw.");
+  log("       --comment <path> writes the sticky PR-comment markdown to <path> (deletes it on a");
+  log("       clean result); this is what the composite action posts to the pull request.");
   log("");
   log("the full pass writes .i18nswarm/report.html (zine report + verdict card), card.svg, and review-queue.json");
 }

@@ -19,6 +19,8 @@ export type { Verdict, Confidence, VerifyDecision } from "./verdict.ts";
 export { runCheck, unifiedDiff } from "./check.ts";
 export type { CheckResult, FileCheck, CheckFlag, CheckOpts, SuppressedFlag } from "./check.ts";
 
+export { buildPrComment, PR_COMMENT_MARKER } from "./pr-comment.ts";
+
 export { classifySuppression, loadSuppressConfig, makeConfig, defaultConfig } from "./suppress.ts";
 export type { SuppressConfig, SuppressBucket, SuppressResult } from "./suppress.ts";
 
