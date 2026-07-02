@@ -7,6 +7,7 @@ import {
   isHandle, isBrand, isDecorativeImageText, isCodeish, isDevOnlyPath, hasInlineIgnore,
   classifySuppression, makeConfig, defaultConfig,
 } from "../src/suppress.ts";
+import { extractJsxFile } from "../src/extract-jsx.ts";
 import type { Candidate } from "../src/types.ts";
 
 let n = 0;
@@ -46,6 +47,19 @@ check("decorative: filename / illustration / logo / slide alt suppressed; descri
 check("decorative: aria-hidden / role=presentation context flag is suppressed", () => {
   const c = cand("→", { decorative: true });
   assert.equal(classifySuppression(c, "f.tsx", "<span aria-hidden>→</span>", cfg).bucket, "decorative");
+});
+check("REGRESSION: aria-hidden element's OWN alt attr is suppressed end-to-end (extract -> gate), not just its text children", () => {
+  // Before the fix, extractJsxFile never stamped `decorative` on attr candidates, so
+  // this alt text (which does not match any isDecorativeImageText pattern on its own)
+  // would reach the gate as an unsuppressed HIGH flag -- a false positive on a
+  // screen-reader-hidden image.
+  const src = `export default function D(){return (<img aria-hidden alt="A red fox" src="/fox.png" />);}`;
+  const cs = extractJsxFile("Demo.tsx", src).candidates;
+  const alt = cs.find((c) => c.attrName === "alt")!;
+  assert.ok(alt, "alt candidate exists");
+  const res = classifySuppression(alt, "Demo.tsx", src, cfg);
+  assert.equal(res.suppressed, true, "a decorative element's own alt must be suppressed");
+  assert.equal(res.bucket, "decorative");
 });
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   hasLetter, norm, isVersionLike, isIconClass, isComponentTag,
-  classifyText, classifyAttr, classifyExprString,
+  classifyText, classifyAttr, classifyExprString, isEntityOnlyText,
 } from "../src/classify-core.ts";
 import { scaffoldReact } from "../src/scaffold-react.ts";
 import { extractJsxFile, detectScope, fileI18nState } from "../src/extract-jsx.ts";
@@ -173,6 +173,99 @@ check("fragment <>...</> is transparent; leaf children still HIGH", () => {
 check("spread attributes {...props} do not crash and yield nothing", () => {
   const cs = ex(wrap(`<button {...rest}>Go</button>`));
   assert.equal(byCls(cs, "HIGH").length, 1);
+});
+
+// ============================================================================
+// 2b. REGRESSION -- 3 defects caught by a real-world usability test (todomvc-react +
+// a Next.js starter), fixed here. Each of these fails on the pre-fix code and passes
+// after; they are wired into `selfcheck` so this class of bug cannot silently return.
+// ============================================================================
+
+// --- defect 1: hardcoded JSX inside {cond && <X/>}, a ternary, or .map() was
+// invisible -- walk() returned from the JsxExpression branch without ever recursing
+// into the expression, so no candidate was produced at all (not FAIL, not SKIP).
+check("REGRESSION defect 1: text inside {cond && <X/>} is detected, not silently missed", () => {
+  const cs = ex(wrap(`<div>{isOpen && <div className="modal"><button>Close</button></div>}</div>`));
+  const h = byCls(cs, "HIGH").map((c) => c.text);
+  assert.ok(h.includes("Close"), "&& RHS JSX text must be extracted");
+});
+check("REGRESSION defect 1: text inside a ternary {a ? <X/> : <Y/>} is detected on BOTH branches", () => {
+  const cs = ex(wrap(`<div>{step === 1 ? <h2>Step one</h2> : <h2>Step two</h2>}</div>`));
+  const h = byCls(cs, "HIGH").map((c) => c.text);
+  assert.ok(h.includes("Step one"), "ternary whenTrue branch must be extracted");
+  assert.ok(h.includes("Step two"), "ternary whenFalse branch must be extracted");
+});
+check("REGRESSION defect 1: text inside {items.map(i => <X/>)} is detected", () => {
+  const cs = ex(wrap(`<ul>{items.map((item) => <li key={item.id}>Delete</li>)}</ul>`));
+  const h = byCls(cs, "HIGH").map((c) => c.text);
+  assert.ok(h.includes("Delete"), ".map() callback JSX text must be extracted");
+});
+check("REGRESSION defect 1: offsets stay correct end-to-end -- the rewrite actually lands on the right span", () => {
+  const src = wrap(`<div>{isOpen && <button>Close</button>}{step ? <h2>Step one</h2> : <h2>Step two</h2>}</div>`);
+  const cs = ex(src); assignKeys(cs);
+  const { out, result } = rewriteJsxFile("Demo.tsx", src, cs, false);
+  assert.equal(result.corrupted, false);
+  assert.match(out, /\{isOpen && <button>\{t\('demo\.close'\)\}<\/button>\}/);
+  assert.match(out, /<h2>\{t\('demo\.step_one'\)\}<\/h2>/);
+  assert.match(out, /<h2>\{t\('demo\.step_two'\)\}<\/h2>/);
+  assert.equal(jsxParseErrors("Demo.tsx", out), 0, "rewritten output still parses");
+});
+check("REGRESSION defect 1: already-i18n'd {t('x')} inside a ternary is still not re-extracted", () => {
+  const cs = ex(wrap(`<div>{cond ? <button>{t('demo.save')}</button> : null}</div>`));
+  assert.equal(byCls(cs, "HIGH").length, 0, "an existing t() call inside a conditional stays an expression, not a literal");
+});
+
+// --- defect 2: aria-hidden/decorative context was stamped on TEXT candidates only;
+// pushAttrs() never read or set it, so a decorative element's OWN alt/title attribute
+// still flagged HIGH (false positive against the README's "decorative" bucket).
+check("REGRESSION defect 2: an aria-hidden element's OWN alt attr is stamped decorative", () => {
+  const cs = ex(wrap(`<img aria-hidden alt="A red fox" src="/fox.png" />`));
+  const alt = cs.find((c) => c.attrName === "alt");
+  assert.ok(alt, "alt candidate must still exist");
+  assert.equal(alt!.decorative, true, "an aria-hidden element's own attrs must be marked decorative, not just its text children");
+});
+check("REGRESSION defect 2: an aria-hidden PARENT propagates decorative to a child element's own attrs", () => {
+  const cs = ex(wrap(`<span aria-hidden><img alt="A red fox" src="/fox.png" /></span>`));
+  const alt = cs.find((c) => c.attrName === "alt");
+  assert.equal(alt!.decorative, true);
+});
+check("REGRESSION defect 2: role=presentation marks a JsxElement's own title attr decorative", () => {
+  const cs = ex(wrap(`<div role="presentation" title="Decorative divider" />`));
+  const title = cs.find((c) => c.attrName === "title");
+  assert.equal(title!.decorative, true);
+});
+
+// --- defect 3: entity-only JSX text ("&times;", "&copy;") was classified HIGH and
+// rewired to {t('key')} with the un-decoded literal as the JSON value -- the rendered
+// UI regressed from the glyph ("x", "(c)") to the literal escape sequence.
+check("REGRESSION defect 3: isEntityOnlyText identifies bare entities, not mixed prose", () => {
+  assert.equal(isEntityOnlyText("&times;"), true);
+  assert.equal(isEntityOnlyText("&copy;"), true);
+  assert.equal(isEntityOnlyText("&#215;"), true);
+  assert.equal(isEntityOnlyText("&#xD7;"), true);
+  assert.equal(isEntityOnlyText("&times; &copy;"), true, "more than one bare entity is still entity-only");
+  assert.equal(isEntityOnlyText("Rock & Roll"), false, "a literal ampersand character is not an entity escape");
+  assert.equal(isEntityOnlyText("Save"), false);
+});
+check("REGRESSION defect 3: entity-only JSX text is SKIP, not HIGH", () => {
+  const cs = ex(wrap(`<button>&times;</button>`));
+  assert.equal(byCls(cs, "HIGH").length, 0, "must not be auto-rewired");
+  const skip = byCls(cs, "SKIP");
+  assert.equal(skip.length, 1);
+  assert.match(skip[0].reason, /entity/i);
+});
+check("REGRESSION defect 3: entity-only attr value is dropped, not queued/wired", () => {
+  const cs = ex(wrap(`<button aria-label="&copy;">X</button>`));
+  assert.equal(cs.filter((c) => c.attrName === "aria-label").length, 0, "entity-only attr value is not a candidate at all");
+});
+check("REGRESSION defect 3: retrofit end-to-end -- entity-only text is left untouched by the rewrite and excluded from the catalog", () => {
+  const src = wrap(`<button>&times;</button>`);
+  const cs = ex(src); assignKeys(cs);
+  const locales = buildLocales(cs);
+  assert.deepEqual(Object.values(locales.en), [], "no key/value pair carries the raw escape sequence");
+  const { out, result } = rewriteJsxFile("Demo.tsx", src, cs, false);
+  assert.equal(result.edits, 0, "nothing rewired");
+  assert.equal(out, src, "source is byte-identical: the &times; button still renders '×', never the literal escape");
 });
 
 // ============================================================================

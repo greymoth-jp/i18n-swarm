@@ -39,6 +39,22 @@ export const hasLetter = (s: string): boolean => /\p{L}/u.test(s);
 export const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
 export const isIconClass = (className: string): boolean => ICON_CLASS.test(className);
 
+// One HTML/XML entity reference: named ("&times;", "&copy;"), decimal ("&#215;"), or hex ("&#xD7;").
+const ENTITY_TOKEN = /&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/;
+
+/** Text that is nothing but one or more HTML entity references (optionally with whitespace
+ *  between them) — "&times;", "&copy;", "&#215;". The TypeScript parser does NOT decode
+ *  entities in JSX text or JSX attribute string values (unlike Vue SFC template text, which
+ *  `@vue/compiler-sfc` decodes at parse time), so this is the raw, still-escaped source form.
+ *  Auto-rewiring it would write the literal escape sequence into the locale JSON and render
+ *  it verbatim through `t()` — "&times;" on the page instead of "×" — a visible regression.
+ *  Not safe to guess a decoding for; treated as non-copy instead. */
+export const isEntityOnlyText = (text: string): boolean => {
+  if (!ENTITY_TOKEN.test(text)) return false;
+  const stripped = text.replace(new RegExp(ENTITY_TOKEN.source, "g"), "").trim();
+  return stripped === "";
+};
+
 /** A single dotted/hyphenated/coloned numeric token: version, id, SKU, time — not copy.
  *  e.g. "v2.3.1", "12:30", "AB-12". A string with whitespace is never version-like. */
 export const isVersionLike = (text: string): boolean =>
@@ -96,6 +112,7 @@ export function classifyText(text: string, ctx: TextCtx): Decision | null {
   if (!text) return null;
   if (ctx.inCode) return { cls: "SKIP", reason: "inside code/preformatted block" };
   if (ctx.iconParent) return { cls: "SKIP", reason: "icon-font ligature (would break the glyph)" };
+  if (isEntityOnlyText(text)) return { cls: "SKIP", reason: "HTML entity reference (would render un-decoded through t(), not the glyph)" };
   if (!hasLetter(text)) return { cls: "SKIP", reason: "no natural-language letters (number/symbol)" };
   if (isVersionLike(text)) return { cls: "SKIP", reason: "version/identifier-like token" };
   if (ctx.inSentence) return { cls: "AMBIGUOUS", reason: "fragment of a mixed text+markup/interpolation sentence" };
@@ -117,6 +134,7 @@ export function classifyText(text: string, ctx: TextCtx): Decision | null {
 export function classifyAttr(name: string, value: string, ownerTag: string): Decision | null {
   const val = norm(value);
   if (!val || !hasLetter(val)) return null;
+  if (isEntityOnlyText(val)) return null; // e.g. alt="&times;" -- see isEntityOnlyText
   const lname = name.toLowerCase();
   if (TEXT_ATTRS.has(lname)) return { cls: "HIGH", reason: `user-facing attribute "${name}"` };
   if (NEVER_COPY_ATTRS.has(lname)) return null;
