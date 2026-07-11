@@ -33,7 +33,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-        run: npx i18n-swarm@0.1.0 check "$BASE..$HEAD"
+        run: npx i18n-swarm@0.1.1 check "$BASE..$HEAD"
 ```
 
 `fetch-depth: 0` matters: the gate asks "what strings did this PR add?", so it needs the
@@ -311,3 +311,5 @@ a translation hook cannot go.
 ## License
 
 MIT. Author: greymoth. Issues and source: https://github.com/greymoth-jp/i18n-swarm
+
+For the CJK-specific side of this problem, see the real-bug corpus [cjk-failure-corpus](https://github.com/greymoth-jp/cjk-failure-corpus) and its runnable regression suite [cjk-agent-fixtures](https://github.com/greymoth-jp/cjk-agent-fixtures).
